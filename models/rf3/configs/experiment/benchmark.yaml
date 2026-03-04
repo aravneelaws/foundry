@@ -1,0 +1,58 @@
+# @package _global_
+
+# Benchmark experiment for RF3 on B300 GPUs.
+# Uses synthetic data (no external data dependencies).
+# Trains from scratch to measure raw compute throughput.
+
+name: benchmark
+project: rf3-benchmark
+
+tags:
+  - benchmark
+  - synthetic
+  - b300
+
+defaults:
+  - override /datasets: synthetic
+  - override /model: rf3
+  - override /trainer: rf3
+  - override /callbacks: benchmark
+  - override /logger: csv
+
+# No pretrained checkpoint -- training from scratch
+ckpt_config: null
+ckpt_path: null
+
+# Override paths to use local FSx storage
+paths:
+  log_dir: /fsx/ubuntu/training/logs
+
+trainer:
+  # Short run for benchmarking
+  # With 8 GPUs: each GPU sees 400/8 = 50 steps per epoch
+  # Total: 4 epochs x 50 steps = 200 steps per GPU
+  max_epochs: 4
+  n_examples_per_epoch: 400
+  validate_every_n_epochs: 999999  # effectively disabled (val dataset is null anyway)
+  prevalidate: false
+  checkpoint_every_n_epochs: 999999  # effectively disabled
+
+  # Limit batches (set to large number to use n_examples_per_epoch as the limiter)
+  limit_train_batches: 10000
+  limit_val_batches: 0
+
+  # DDP settings (override from command line for multi-node)
+  devices_per_node: 8
+  num_nodes: 1
+
+# Use smaller diffusion batch size for initial testing
+# (production uses 48, but that may OOM on first pass)
+datasets:
+  diffusion_batch_size_train: 48
+  n_recycles_train: 4
+
+# No EMA for benchmark (speeds up and isolates pure training throughput)
+model:
+  ema: null
+  lr_scheduler:
+    base_lr: 1.8e-3

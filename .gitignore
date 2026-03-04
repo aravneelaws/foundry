@@ -232,3 +232,6 @@ logs/
 # AI
 **/CLAUDE.md
 **/.claude
+
+# Local project context (not for version control)
+.local/

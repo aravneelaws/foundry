@@ -1,0 +1,18 @@
+# Benchmark callback configuration.
+# Includes training loss logging, timing, and profiling.
+# No validation or structure dump callbacks.
+
+defaults:
+  - train_logging
+  - _self_
+
+timing_callback:
+  _target_: foundry.callbacks.timing_logging.TimingCallback
+  log_every_n: 10
+
+profiling_callback:
+  _target_: foundry.callbacks.profiling.ProfilingCallback
+  log_every_n: 10
+  gpu_poll_interval: 0.1
+  num_tokens_per_example: ${datasets.crop_size}
+  num_atoms_per_example: 3072
