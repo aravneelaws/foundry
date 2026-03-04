@@ -40,7 +40,20 @@ uv pip install --python /fsx/ubuntu/venvs/foundry/bin/python \
   torch==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-## 3. Verify Installation
+## 3. Fix NVRTC for Blackwell
+
+PyTorch bundles NVRTC 12.8 which does not support SM 10.3. Replace with CUDA 13.0's NVRTC:
+
+```bash
+source /fsx/ubuntu/venvs/foundry/bin/activate
+NVRTC_DIR=$(python -c "import nvidia.cuda_nvrtc; import os; print(os.path.dirname(nvidia.cuda_nvrtc.__file__))")/lib
+cp "$NVRTC_DIR/libnvrtc.so.12" "$NVRTC_DIR/libnvrtc.so.12.backup"
+cp "$NVRTC_DIR/libnvrtc-builtins.so.12.8" "$NVRTC_DIR/libnvrtc-builtins.so.12.8.backup"
+cp /usr/local/cuda-13.0/lib64/libnvrtc.so.13.0.88 "$NVRTC_DIR/libnvrtc.so.12"
+cp /usr/local/cuda-13.0/lib64/libnvrtc-builtins.so.13.0.88 "$NVRTC_DIR/libnvrtc-builtins.so.12.8"
+```
+
+## 4. Verify Installation
 
 ```bash
 srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
@@ -66,7 +79,7 @@ Compute capability: (10, 3)
 RF3 imports: OK
 ```
 
-## 4. Download RF3 Checkpoint
+## 5. Download RF3 Checkpoint
 
 ```bash
 srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
@@ -75,7 +88,7 @@ srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
 '
 ```
 
-## 5. Run Inference (Functional Proof)
+## 6. Run Inference (Functional Proof)
 
 ### Interactive (single test file)
 
@@ -98,7 +111,7 @@ sbatch scripts/inference_test.sbatch
 # Check output: cat slurm_logs/<job_id>.out
 ```
 
-## 6. Run Training Benchmark
+## 7. Run Training Benchmark
 
 ### Single-node smoke test (8 GPUs, 50 steps)
 
@@ -131,5 +144,7 @@ sbatch scripts/benchmark_rf3.sbatch
 |---------|----------|
 | `nvidia-smi` fails on head node | GPU drivers only on compute nodes. Use `srun --gres=gpu:1` |
 | PyTorch says CUDA not available | Reinstall cu128 wheel (step 2) |
+| `nvrtc: error: invalid value for --gpu-architecture` | Replace bundled NVRTC with CUDA 13.0 version (step 3) |
+| `LLVM ERROR: Cannot select: intrinsic` | Set `export DISABLE_CUEQUIVARIANCE=1` |
 | `ModuleNotFoundError: cuequivariance_ops_cu12` | Module name is `cuequivariance_ops` (no `_cu12`). If import fails, reinstall `cuequivariance-ops-cu12` |
 | Slurm job stuck in PENDING | Check `sinfo` -- nodes may be in use. Only 2 nodes available |

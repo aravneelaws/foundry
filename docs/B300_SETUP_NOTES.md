@@ -67,7 +67,42 @@ The pip package is called `cuequivariance-ops-cu12` but the Python module is `cu
 
 - **NVLink P2P**: All 8 B300 GPUs within a node can do direct P2P memory access via NVLink. No special configuration needed.
 - **EFA networking**: The OFI-NCCL plugin is pre-installed at `/opt/amazon/ofi-nccl/lib/`. Cross-node NCCL communication should work out of the box with the right environment variables.
-- **cuequivariance on Blackwell**: The `cuequivariance-ops-cu12` v0.9.0 package works on B300 without recompilation, despite being built for cu12. The ops are compatible with the cu128 PyTorch runtime.
+
+### The NVRTC JIT Problem (Blackwell-Specific)
+
+This was the most significant Blackwell compatibility issue. PyTorch uses NVRTC (NVIDIA Runtime Compiler) to JIT-compile certain CUDA kernels at runtime. The NVRTC version bundled with PyTorch (via the `nvidia-cuda-nvrtc-cu12` pip package) ships NVRTC 12.8, which does not know about SM 10.3 (Blackwell). This causes any op using JIT compilation to fail:
+
+```
+nvrtc: error: invalid value for --gpu-architecture (-arch)
+```
+
+Affected ops we discovered: `torch.erfinv` (used in weight init), `torch.prod` (used in inference pipeline). Most PyTorch ops use pre-compiled kernels and work fine; only the JIT-compiled ops fail.
+
+We tried several approaches:
+1. **PyTorch nightly (2.12.0.dev+cu128)**: Same NVRTC, same failure
+2. **`LD_PRELOAD` with CUDA 13.0 NVRTC**: PyTorch loads its bundled version first, doesn't pick up the system one
+3. **Python monkey-patching** (`rf3/blackwell_compat.py`): Works for Python-dispatched ops like `erfinv`, but `prod` is dispatched entirely in C++ and can't be intercepted
+
+**What worked**: Replacing the bundled NVRTC libraries with CUDA 13.0 versions:
+```bash
+NVRTC_DIR=$(python -c "import nvidia.cuda_nvrtc; import os; print(os.path.dirname(nvidia.cuda_nvrtc.__file__))")/lib
+cp "$NVRTC_DIR/libnvrtc.so.12" "$NVRTC_DIR/libnvrtc.so.12.backup"
+cp "$NVRTC_DIR/libnvrtc-builtins.so.12.8" "$NVRTC_DIR/libnvrtc-builtins.so.12.8.backup"
+cp /usr/local/cuda-13.0/lib64/libnvrtc.so.13.0.88 "$NVRTC_DIR/libnvrtc.so.12"
+cp /usr/local/cuda-13.0/lib64/libnvrtc-builtins.so.13.0.88 "$NVRTC_DIR/libnvrtc-builtins.so.12.8"
+```
+
+CUDA 13.0 is pre-installed on the HyperPod DLAMI at `/usr/local/cuda-13.0/`. Its NVRTC recognizes SM 10.3 and all JIT-compiled ops work correctly after the swap.
+
+### The cuequivariance LLVM Problem
+
+The `cuequivariance_ops` library (v0.9.0) uses an LLVM-based CUDA backend. This LLVM version does not know about SM 10.3, causing:
+```
+'sm_103a' is not a recognized processor for this target (ignoring processor)
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.shfl.sync.bfly.i32
+```
+
+The fix is simple: set `DISABLE_CUEQUIVARIANCE=1`. The model falls back to vanilla PyTorch implementations for triangle attention and triangle multiplication. These are functionally identical but may be slightly slower. All our sbatch scripts set this variable.
 
 ### Software Versions (in venv)
 
@@ -120,6 +155,11 @@ Or use the sbatch script:
 ```bash
 sbatch scripts/inference_test.sbatch
 ```
+
+**Results (B300 SXM6 AC, single GPU):**
+- `8vkf_from_file.cif`: 1m13s total (includes model load + 200-step diffusion sampling)
+- `5vht_from_file.cif`: 46s (model already cached in GPU memory)
+- Output: CIF structure prediction files generated successfully
 
 **Test files available** (in `models/rf3/tests/data/`):
 - `8vkf_from_file.cif` -- CIF structure file
