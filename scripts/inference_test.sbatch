@@ -27,6 +27,9 @@ source /fsx/ubuntu/venvs/foundry/bin/activate
 cd /fsx/ubuntu/projects/foundry
 export FOUNDRY_CHECKPOINT_DIRS=/fsx/ubuntu/checkpoints
 
+# Disable cuequivariance (LLVM backend does not support Blackwell SM 10.3 yet)
+export DISABLE_CUEQUIVARIANCE=1
+
 # Print environment info
 echo "===== Environment ====="
 echo "Date: $(date)"
