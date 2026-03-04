@@ -16,7 +16,14 @@ def init_lecun_normal(module, scale=1.0):
         )
 
         v = torch.clamp(2 * p - 1, -1 + 1e-8, 1 - 1e-8)
-        x = mu + sigma * np.sqrt(2) * torch.erfinv(v)
+        # NOTE: torch.erfinv uses NVRTC JIT compilation which may not support
+        # the current GPU architecture (e.g. Blackwell SM 10.3). Fall back to
+        # CPU computation when the GPU kernel fails.
+        try:
+            x = mu + sigma * np.sqrt(2) * torch.erfinv(v)
+        except RuntimeError:
+            device = v.device
+            x = mu + sigma * np.sqrt(2) * torch.erfinv(v.cpu()).to(device)
         x = torch.clamp(x, a, b)
 
         return x
