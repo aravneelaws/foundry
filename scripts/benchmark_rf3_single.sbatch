@@ -2,9 +2,9 @@
 #SBATCH --job-name=rf3-bench-1node
 #SBATCH --partition=dev
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=192
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=24
 #SBATCH --exclusive
 #SBATCH --time=01:00:00
 #SBATCH --output=slurm_logs/%j-bench-1node.out
