@@ -165,6 +165,10 @@ class SyntheticRF3Dataset(Dataset):
         ground_truth = {
             "coord_atom_lvl": coord_gt.clone(),  # [L, 3]
             "mask_atom_lvl": torch.ones(L, dtype=torch.bool),  # [L]
+            # Token-level ground truth (representative atom per token)
+            # Required by DistogramLoss -- use first I atom coords as token representatives
+            "coord_token_lvl": coord_gt[:I].clone(),  # [I, 3]
+            "mask_token_lvl": torch.ones(I, dtype=torch.bool),  # [I]
         }
 
         # ---- Assemble full example ----
