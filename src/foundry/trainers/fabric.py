@@ -8,6 +8,7 @@ References:
 """
 
 import math
+import os
 from abc import ABC, abstractmethod
 from datetime import timedelta
 from pathlib import Path
@@ -148,6 +149,18 @@ class FabricTrainer(ABC):
                 timeout=timedelta(seconds=nccl_timeout),
                 find_unused_parameters=find_unused_parameters,
             )
+        elif (
+            strategy == "ddp"
+            and not is_interactive_environment()
+            and int(os.environ.get("SLURM_NTASKS", "1")) > 1
+        ):
+            # SLURM multi-task launch: each task is one DDP rank with one GPU.
+            # Force DDPStrategy even though devices_per_node=1 and num_nodes=1,
+            # because SLURM manages process distribution.
+            strategy = DDPStrategy(
+                timeout=timedelta(seconds=nccl_timeout),
+                find_unused_parameters=find_unused_parameters,
+            )
         else:
             strategy = "auto"  # type: ignore
 
@@ -227,9 +240,9 @@ class FabricTrainer(ABC):
         We provide a default implementation that instantiates the optimizer(s) from the Hydra configuration.
         More complex models (e.g., GANs) may require custom implementations.
         """
-        assert (
-            "model" in self.state and hasattr(self.state["model"], "parameters")
-        ), "Model not found in state dictionary! You must call `construct_model()` before constructing the optimizer."
+        assert "model" in self.state and hasattr(self.state["model"], "parameters"), (
+            "Model not found in state dictionary! You must call `construct_model()` before constructing the optimizer."
+        )
 
         if self.state["train_cfg"].model.optimizer:
             # ... instantiate the optimizer
@@ -245,9 +258,9 @@ class FabricTrainer(ABC):
         Like optimizers, we provided a default implementation that instantiates the scheduler(s) from the Hydra configuration.
         More complex models (e.g., GANs) may require custom implementations.
         """
-        assert (
-            "optimizer" in self.state and self.state["optimizer"]
-        ), "Optimizer not found in state dictionary! You must call `construct_optimizer()` before constructing the scheduler."
+        assert "optimizer" in self.state and self.state["optimizer"], (
+            "Optimizer not found in state dictionary! You must call `construct_optimizer()` before constructing the scheduler."
+        )
 
         # ...  instantiate the LR scheduler(s)
         lr_scheduler = (
@@ -297,9 +310,9 @@ class FabricTrainer(ABC):
         Note that we must call this method after constructing (instantiating) the model, optimizer(s), and scheduler(s).
         For details on multi-model and multi-optimizer setups, see: https://lightning.ai/docs/fabric/2.2.3/advanced/multiple_setup.html
         """
-        assert self.state[
-            "model"
-        ], "You must construct the model before setting up the model, optimizer, and scheduler."
+        assert self.state["model"], (
+            "You must construct the model before setting up the model, optimizer, and scheduler."
+        )
         model = self.state["model"]
         optimizer = self.state["optimizer"]
 
@@ -338,9 +351,9 @@ class FabricTrainer(ABC):
                     if shapes do not match)
                 - reset_optimizer: Whether to reset the optimizer state when loading a checkpoint. If True, the optimizer will not be loaded from the checkpoint.
         """
-        assert (
-            hasattr(self, "state") and "model" in self.state
-        ), "Model not found in state dictionary! You must call `instantiate_model()` before running fit()."
+        assert hasattr(self, "state") and "model" in self.state, (
+            "Model not found in state dictionary! You must call `instantiate_model()` before running fit()."
+        )
 
         # (If we don't have enough examples to sample, we will log a warning and use the smaller number)
         if len(train_loader) * self.fabric.world_size < self.n_examples_per_epoch:
@@ -369,9 +382,9 @@ class FabricTrainer(ABC):
         self.setup_model_optimizers_and_schedulers()
 
         if ckpt_config is not None:
-            assert hasattr(
-                ckpt_config, "path"
-            ), "Checkpoint path not found in checkpoint configuration!"
+            assert hasattr(ckpt_config, "path"), (
+                "Checkpoint path not found in checkpoint configuration!"
+            )
             ckpt_path = Path(ckpt_config.path)
 
             reset_optimizer = bool(
@@ -691,9 +704,9 @@ class FabricTrainer(ABC):
             val_loaders: A dictionary of dataloaders for validation, where keys are names and values are dataloaders.
             ckpt_path: Path to a specific checkpoint file to load. If None, the model will be validated as is.
         """
-        assert (
-            hasattr(self, "state") and "model" in self.state
-        ), "Model not found in state dictionary! You must call `instantiate_model()` before running validate()."
+        assert hasattr(self, "state") and "model" in self.state, (
+            "Model not found in state dictionary! You must call `instantiate_model()` before running validate()."
+        )
 
         self.setup_model_optimizers_and_schedulers()
 
