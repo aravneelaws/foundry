@@ -36,11 +36,12 @@ export LD_LIBRARY_PATH=/opt/amazon/ofi-nccl/lib:${LD_LIBRARY_PATH:-}
 export MASTER_ADDR=$(hostname)
 export MASTER_PORT=29500
 
-# Prevent Lightning Fabric from detecting SLURM and enforcing ntasks-per-node
-# validation. With ntasks-per-node=1, Fabric's SubprocessScriptLauncher handles
-# spawning 8 DDP worker processes internally.
-unset SLURM_NTASKS
-unset SLURM_NTASKS_PER_NODE
+# Override SLURM task count so Lightning Fabric's SLURMEnvironment validation
+# passes. We use ntasks-per-node=1 at the SLURM level but need Fabric to see
+# 8 tasks (one per GPU) for DDP. Fabric's SubprocessScriptLauncher then spawns
+# the additional worker processes.
+export SLURM_NTASKS=8
+export SLURM_NTASKS_PER_NODE=8
 
 # ---- Print environment ----
 echo "===== Benchmark Configuration ====="
