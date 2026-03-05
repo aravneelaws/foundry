@@ -142,9 +142,10 @@ class SyntheticRF3Dataset(Dataset):
         # ---- Diffusion tensors ----
         # Sample timesteps from EDM noise schedule range [s_min=4e-4, s_max=160]
         # Using log-uniform distribution matching SampleEDMNoise
-        log_t = torch.empty(D, generator=gen).uniform_(
+        log_t = torch.empty(D).uniform_(
             torch.tensor(4e-4).log().item(),
             torch.tensor(160.0).log().item(),
+            generator=gen,
         )
         t = log_t.exp()  # [D]
 
