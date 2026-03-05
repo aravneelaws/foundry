@@ -102,6 +102,9 @@ class SyntheticRF3Dataset(Dataset):
             "has_atom_level_embedding": torch.zeros(
                 L, 1
             ),  # [L, 1] -- no atom-level embeddings in synthetic data
+            # Atom-level embeddings: [n_conformers, L, embedding_dim]
+            # Required by model when use_atom_level_embedding=True
+            "atom_level_embedding": torch.randn(8, L, 384, generator=gen),
             # Token-level features
             "restype": torch.zeros(I, 32),  # [I, 32] one-hot residue type
             "profile": torch.zeros(I, 32),  # [I, 32] MSA profile
