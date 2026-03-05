@@ -2,9 +2,9 @@
 #SBATCH --job-name=rf3-bench-1node
 #SBATCH --partition=dev
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=24
+#SBATCH --cpus-per-task=192
 #SBATCH --exclusive
 #SBATCH --time=01:00:00
 #SBATCH --output=slurm_logs/%j-bench-1node.out
@@ -35,6 +35,12 @@ export LD_LIBRARY_PATH=/opt/amazon/ofi-nccl/lib:${LD_LIBRARY_PATH:-}
 # ---- Distributed training env vars ----
 export MASTER_ADDR=$(hostname)
 export MASTER_PORT=29500
+
+# Prevent Lightning Fabric from detecting SLURM and enforcing ntasks-per-node
+# validation. With ntasks-per-node=1, Fabric's SubprocessScriptLauncher handles
+# spawning 8 DDP worker processes internally.
+unset SLURM_NTASKS
+unset SLURM_NTASKS_PER_NODE
 
 # ---- Print environment ----
 echo "===== Benchmark Configuration ====="
