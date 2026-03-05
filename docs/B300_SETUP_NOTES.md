@@ -304,26 +304,55 @@ The `ProfilingCallback` (`src/foundry/callbacks/profiling.py`) collects detailed
 
 ## Phase 3: Training Performance Results
 
-> **Status:** Infrastructure ready, awaiting execution on B300 cluster.
+> **Status:** Single-node complete (Job 42). Multi-node pending.
 
-### Expected Metrics
+### Single-node (8x B300 SXM6 AC) -- Job 42
 
-After running the benchmarks, this section will be populated with:
+Benchmark config: `experiment=benchmark`, 4 epochs x 50 batches/GPU = 200 optimizer steps. Synthetic data with crop_size=384, n_atoms=3072, diffusion_batch=48, MSA=1024. Training from scratch (random weights), bf16-mixed precision, DDP across 8 GPUs.
 
-**Single-node (8x B300 SXM6 AC):**
+**Throughput & Timing** (excluding first 5 warmup steps):
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Step time (avg) | _TBD_ | Excluding first 5 warmup steps |
-| Step time (median) | _TBD_ | |
-| Samples/sec | _TBD_ | Across all 8 GPUs |
-| Tokens/sec | _TBD_ | 384 tokens/sample |
-| Atoms/sec | _TBD_ | 3072 atoms/sample |
-| Peak GPU memory allocated | _TBD_ | Per GPU |
-| Peak GPU memory reserved | _TBD_ | Per GPU |
-| GPU SM utilization (avg) | _TBD_ | Via pynvml polling |
+| Step time (avg) | **9.45s** | Per optimizer step across 8 GPUs |
+| Step time (median) | 9.87s | |
+| Step time (min) | 7.51s | |
+| Step time (max) | 11.22s | |
+| Samples/sec | **0.85** | Across all 8 GPUs (1 sample/GPU/step) |
+| Tokens/sec | **325** | 384 tokens/sample |
+| Atoms/sec | ~2,550 | 3072 atoms/sample |
 
-**Multi-node (2x8 = 16x B300 SXM6 AC):**
+**GPU Memory** (per GPU):
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Peak allocated | **23.10 GB** | 8.4% of 275 GB available |
+| Peak reserved | **29.58 GB** | 10.8% of 275 GB available |
+
+**Epoch Timings:**
+
+| Epoch | Wall-clock Time | Batches | Notes |
+|-------|-----------------|---------|-------|
+| 0 | 562s | 50 | Includes CUDA JIT warmup (~80s overhead) |
+| 1 | 483s | 50 | Steady state |
+| 2 | 482s | 50 | Steady state |
+| 3 | 476s | 50 | Steady state |
+
+**NCCL Communication:**
+- Transport: P2P/CUMEM (NVLink) with NVLS (NVLink SHARP)
+- 32 channels per rank pair
+- Single-node only -- no EFA/network communication
+
+**Observations:**
+- **Memory headroom is very large** -- only 8.4% of GPU memory used. This suggests much larger crop sizes (e.g., 768 or 1024 tokens) or larger diffusion batch sizes could fit. Production training with real data may also use more memory due to variable-length sequences.
+- **~80s warmup overhead** in epoch 0 from CUDA kernel JIT compilation on first forward pass. Subsequent epochs are consistent at ~480s.
+- **Loss values are meaningless** (synthetic random data), but gradients flow correctly through all 200 steps without NaN or divergence, confirming the full training pipeline works end-to-end on B300.
+
+**Profiling CSV:** `/fsx/ubuntu/training/logs/train/benchmark/2026-03-05_01-32_JOB_42/profiling_metrics.csv` (200 rows, per-step metrics)
+
+### Multi-node (2x8 = 16x B300 SXM6 AC)
+
+> **Status:** Pending. The `scripts/benchmark_rf3.sbatch` script needs to be updated with `ntasks-per-node=8` (same fix applied to the single-node script).
 
 | Metric | Value | Notes |
 |--------|-------|-------|
@@ -357,16 +386,16 @@ After running the benchmarks, this section will be populated with:
 
 | Metric | B300 (no cueq) | H200 (no cueq) | H200 (with cueq) |
 |--------|----------------|-----------------|-------------------|
-| Tokens/sec | _TBD_ | _TBD_ | _TBD_ |
-| Step time | _TBD_ | _TBD_ | _TBD_ |
-| Peak memory | _TBD_ | _TBD_ | _TBD_ |
+| Tokens/sec | 325 | _TBD_ | _TBD_ |
+| Step time | 9.45s | _TBD_ | _TBD_ |
+| Peak memory | 23.10 GB | _TBD_ | _TBD_ |
 | GPU utilization | _TBD_ | _TBD_ | _TBD_ |
 
 4. TCO analysis (cost per token-second):
 
 | Instance | GPU | $/hr (on-demand) | Tokens/sec | $/M tokens |
 |----------|-----|-------------------|------------|------------|
-| p6-b300.48xlarge | 8x B300 | _TBD_ | _TBD_ | _TBD_ |
+| p6-b300.48xlarge | 8x B300 | _TBD_ | 325 | _TBD_ |
 | p5e.48xlarge | 8x H200 | _TBD_ | _TBD_ | _TBD_ |
 
 **Note:** B300 vs H200 comparison with cuEquivariance disabled isolates the raw hardware speedup. The full comparison (B300 no-cueq vs H200 with-cueq) shows the practical gap until cuEquivariance adds Blackwell support.

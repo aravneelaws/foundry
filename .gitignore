@@ -235,3 +235,4 @@ logs/
 
 # Local project context (not for version control)
 .local/
+.opencode/
