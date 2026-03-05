@@ -34,6 +34,8 @@ def instantiate_callbacks(callbacks_cfg: DictConfig | None) -> list[BaseCallback
         return callbacks
 
     for _, cb_conf in callbacks_cfg.items():
+        if cb_conf is None:
+            continue  # null entries disable inherited callbacks
         if _can_be_instantiated(cb_conf):
             callbacks.append(hydra.utils.instantiate(cb_conf))
         else:
