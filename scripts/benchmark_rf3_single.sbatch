@@ -45,11 +45,12 @@ echo "GPUs: 8"
 echo "===================================="
 
 # ---- Launch training ----
-# Each SLURM task is one DDP rank with one GPU (ntasks-per-node=8).
-# Lightning SLURMEnvironment assigns GPUs via SLURM_LOCALID.
+# Each SLURM task is one DDP rank. With ntasks-per-node=8 and gres=gpu:8,
+# Lightning SLURMEnvironment assigns GPU per rank via SLURM_LOCALID.
+# devices_per_node=8 must match ntasks-per-node for SLURM validation.
 srun python models/rf3/src/rf3/train.py \
     experiment=benchmark \
-    trainer.devices_per_node=1 \
+    trainer.devices_per_node=8 \
     trainer.num_nodes=1
 
 echo ""
