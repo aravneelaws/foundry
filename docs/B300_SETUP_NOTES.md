@@ -104,6 +104,36 @@ LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.shfl.sync.bfly.i32
 
 The fix is simple: set `DISABLE_CUEQUIVARIANCE=1`. The model falls back to vanilla PyTorch implementations for triangle attention and triangle multiplication. These are functionally identical but may be slightly slower. All our sbatch scripts set this variable.
 
+### Impact of Disabling cuEquivariance on Benchmark Results
+
+Disabling cuEquivariance is a significant caveat for all B300 benchmark results. Here is what it affects and why.
+
+**What cuEquivariance provides:** Two fused CUDA kernels that accelerate the most compute-intensive operations in the RF3 model:
+
+| Fused Kernel | Operations Fused | Vanilla Fallback |
+|-------------|-----------------|------------------|
+| `cuet.triangle_attention` | Q/K/V projection, scaled dot-product attention, bias addition, softmax, and gating -- in a single kernel launch | Separate `opt_einsum.contract` for attention scores, `F.softmax`, another einsum for value aggregation, `torch.sigmoid` for gating, with intermediate tensor materializations at each step |
+| `cuet.triangle_multiplicative_update` | Input LayerNorm, dual projection, sigmoid gating, einsum contraction, output LayerNorm, output projection, and output gating -- in a single kernel launch | Separate `nn.LayerNorm`, tensor slicing, `torch.sigmoid`, `torch.einsum`, another `nn.LayerNorm`, `nn.Linear`, and gating, each materializing intermediate tensors over `(B, L, L, D)` pair space |
+
+**Where these run in the model:** Every `PairformerBlock` contains 4 triangle operations (2x Triangle Attention + 2x Triangle Multiplication). Every `MSAModule` also contains 4 triangle operations. These blocks are the core of the RF3 Pairformer trunk, so the fused kernels affect a large fraction of total compute.
+
+**The fallback path:** With `DISABLE_CUEQUIVARIANCE=1`, the model uses pure vanilla PyTorch eager-mode operations (see `models/rf3/src/rf3/model/layers/attention.py`, methods `_forward_vanilla` in both `TriangleAttention` and `TriangleMultiplication`). There is no intermediate option -- no FlashAttention or Triton kernel exists for these specific triangle operations. The fallback is functionally identical (same math, same outputs) but requires multiple kernel launches and intermediate memory allocations where the fused path uses one.
+
+**Impact on benchmark comparisons:** On H200 GPUs, cuEquivariance is automatically enabled (the `SHOULD_USE_CUEQUIVARIANCE` flag in `src/foundry/__init__.py` is set to `True` when the library imports successfully). On B300, it must be disabled. This means:
+- Any **B300 vs H200 comparison is apples-to-oranges** for these operations unless H200 is also measured with cuEquivariance disabled
+- B300 throughput numbers are **pessimistic** -- they reflect the cost of the vanilla fallback, not the best achievable performance on Blackwell
+- This gap will close once cuEquivariance adds SM 10.3 / Blackwell support in a future release
+
+**Recommendation for fair comparison:** When running H200 baselines (Phase 4), measure **both** with and without cuEquivariance:
+```bash
+# H200 with cuEquivariance (default -- reflects production performance)
+sbatch scripts/benchmark_rf3.sbatch
+
+# H200 without cuEquivariance (matches B300 conditions -- fair hardware comparison)
+DISABLE_CUEQUIVARIANCE=1 sbatch scripts/benchmark_rf3.sbatch
+```
+This isolates the hardware performance difference from the software optimization difference.
+
 ### Software Versions (in venv)
 
 | Package | Version |
@@ -157,8 +187,8 @@ sbatch scripts/inference_test.sbatch
 ```
 
 **Results (B300 SXM6 AC, single GPU):**
-- `8vkf_from_file.cif`: 1m13s total (includes model load + 200-step diffusion sampling)
-- `5vht_from_file.cif`: 46s (model already cached in GPU memory)
+- `8vkf_from_file.cif`: **1m 13s** wall-clock (cold start: includes checkpoint load + 10 recycles + 50-step diffusion x 5 samples)
+- `5vht_from_file.cif`: **46s** wall-clock (warm start: model already cached in GPU memory)
 - Output: CIF structure prediction files generated successfully
 
 **Test files available** (in `models/rf3/tests/data/`):
@@ -167,16 +197,176 @@ sbatch scripts/inference_test.sbatch
 - `5vht_from_json.json` -- JSON input format
 - `multiple_examples_from_json.json` -- Batch JSON input
 
+**How these results were measured:**
+
+These timings use the **existing upstream RF3 inference pipeline** (`rf3 fold` CLI), not custom benchmark code. Each invocation is wrapped with the `time` shell command in `scripts/inference_test.sbatch`. The inference config (default `rf3.yaml`) runs 10 recycles, 5 diffusion samples at 50 timesteps each.
+
+**Test protein details:**
+
+| PDB ID | Protein | Residues | Notes |
+|--------|---------|----------|-------|
+| 8VKF | Cytochrome P450 CYP199A4 | ~407 | Larger structure with heme, ligand, ions, 454 waters |
+| 5VHT | E. coli Chorismate Mutase | ~184 (homodimer) | Smaller structure with non-canonical amino acid, 73 waters |
+
+**Cold vs. warm start:** The first run (8VKF, 1m 13s) includes one-time costs: loading the ~600MB checkpoint from FSx to GPU, model initialization, and CUDA kernel JIT compilation. The second run (5VHT, 46s) skips these because the model remains in GPU memory. The ~27s difference reflects both the initialization overhead and the difference in protein size.
+
+**Interpretability limitations:**
+- No H200 baseline comparison yet (planned for Phase 4)
+- Single run per protein -- no variance or confidence intervals measured
+- Model load time and pure inference time are not separated
+- cuEquivariance is disabled (`DISABLE_CUEQUIVARIANCE=1`), meaning triangle operations use vanilla PyTorch fallback (see "Impact of Disabling cuEquivariance" below)
+
 **Expected output:** CIF structure prediction files in the output directory.
 
-### Step 2.3: Synthetic Training Benchmark (TODO)
+### Step 2.3: Synthetic Training Benchmark
 
-### Step 2.4: Benchmark Configs (TODO)
+To benchmark training throughput without external data dependencies, we use a synthetic dataset that generates random tensors matching the exact shapes and dtypes expected by `RF3Trainer.training_step()`. This isolates GPU compute performance from data I/O.
 
-### Step 2.5: Profiling Callback (TODO)
+**Synthetic data design** (`models/rf3/src/rf3/data/synthetic.py`):
+- Generates complete training examples in-memory (no disk I/O)
+- Produces atom-level features (3072 atoms), token-level features (384 tokens), MSA stacks (1024 sequences x 4 recycles), diffusion tensors (48 samples), and ground truth coordinates
+- Deterministic per-example seeding (`seed + idx`) for reproducibility
+- Pre-computes valid `atom_to_token_map` and `ref_space_uid` shared across examples
+
+**Running the benchmark:**
+
+Single-node smoke test (8 GPUs, ~50 steps/GPU/epoch x 4 epochs):
+```bash
+mkdir -p slurm_logs
+sbatch scripts/benchmark_rf3_single.sbatch
+```
+
+Full 2-node benchmark (16 GPUs across 2 nodes):
+```bash
+mkdir -p slurm_logs
+sbatch scripts/benchmark_rf3.sbatch
+```
+
+**Bug fixes applied for synthetic data compatibility:**
+- Disabled `LogDatasetSamplingRatiosCallback` in `callbacks/benchmark.yaml` -- it calls `parse_example_id()` which expects structured PDB-format IDs, not the `"synthetic_{idx}"` format
+- Set `dataloader.train.n_fallback_retries: 0` in `experiment/benchmark.yaml` -- the `FallbackDatasetWrapper` is designed for production PDB datasets that can have corrupt files; synthetic data never fails, and the wrapper adds overhead that pollutes throughput measurements
+
+### Step 2.4: Benchmark Configs
+
+The benchmark uses three Hydra config files that compose together:
+
+**`configs/experiment/benchmark.yaml`** -- Top-level experiment config:
+- Overrides datasets → `synthetic`, callbacks → `benchmark`, logger → `csv`
+- Trains from scratch (no checkpoint), 4 epochs x 400 examples/epoch
+- Disables validation, checkpointing, and EMA for pure throughput measurement
+- Sets diffusion batch size = 48, recycles = 4
+- Disables `FallbackDatasetWrapper` (`n_fallback_retries: 0`)
+
+**`configs/datasets/synthetic.yaml`** -- Dataset config:
+- Single `SyntheticRF3Dataset` with `crop_size=384`, `n_atoms=3072`, `n_msa=1024`
+- Disables all augmentations (mirror, atomization, ligand dropout)
+- Validation set is `null`
+
+**`configs/callbacks/benchmark.yaml`** -- Callback config:
+- Inherits `train_logging` (loss logging, LR logging, model parameter logging)
+- Disables `LogDatasetSamplingRatiosCallback` (incompatible with synthetic IDs)
+- Adds `TimingCallback` (per-step wall-clock timing, logs every 10 steps)
+- Adds `ProfilingCallback` (throughput, GPU memory, GPU utilization, logs every 10 steps)
+
+**Config overrides via command line:** The Slurm scripts pass Hydra overrides for multi-node settings:
+```bash
+# Single node
+srun python models/rf3/src/rf3/train.py experiment=benchmark trainer.devices_per_node=8 trainer.num_nodes=1
+
+# 2 nodes
+srun python models/rf3/src/rf3/train.py experiment=benchmark trainer.devices_per_node=8 trainer.num_nodes=2
+```
+
+### Step 2.5: Profiling Callback
+
+The `ProfilingCallback` (`src/foundry/callbacks/profiling.py`) collects detailed metrics during training:
+
+**Metrics collected per step:**
+| Metric | Source | Unit |
+|--------|--------|------|
+| `step_time` | `torch.cuda.synchronize()` barriers around each step | seconds |
+| `samples_per_sec` | `world_size / step_time` | samples/sec |
+| `tokens_per_sec` | `samples_per_sec * num_tokens_per_example` | tokens/sec |
+| `atoms_per_sec` | `samples_per_sec * num_atoms_per_example` | atoms/sec |
+| `gpu_mem_allocated` | `torch.cuda.memory_stats()` peak allocated | GB |
+| `gpu_mem_reserved` | `torch.cuda.memory_stats()` peak reserved | GB |
+| `gpu_utilization` | `pynvml` SM utilization polling (background thread) | % |
+| `gpu_mem_utilization` | `pynvml` memory utilization polling | % |
+
+**Output:**
+- Per-step CSV at `{output_dir}/profiling_metrics.csv`
+- Aggregated metrics logged every 10 steps to the CSV logger
+- Final summary at end of training (excludes first 5 warmup steps): avg/min/max/median step time, throughput, and peak memory
+
+**Dependency note:** GPU utilization polling requires `pynvml`. If not installed, the callback prints a warning and disables utilization metrics (other metrics still work).
 
 ---
 
-## Phase 3: Training Performance Results (TODO)
+## Phase 3: Training Performance Results
 
-## Phase 4: H200 Comparison & TCO Analysis (TODO)
+> **Status:** Infrastructure ready, awaiting execution on B300 cluster.
+
+### Expected Metrics
+
+After running the benchmarks, this section will be populated with:
+
+**Single-node (8x B300 SXM6 AC):**
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Step time (avg) | _TBD_ | Excluding first 5 warmup steps |
+| Step time (median) | _TBD_ | |
+| Samples/sec | _TBD_ | Across all 8 GPUs |
+| Tokens/sec | _TBD_ | 384 tokens/sample |
+| Atoms/sec | _TBD_ | 3072 atoms/sample |
+| Peak GPU memory allocated | _TBD_ | Per GPU |
+| Peak GPU memory reserved | _TBD_ | Per GPU |
+| GPU SM utilization (avg) | _TBD_ | Via pynvml polling |
+
+**Multi-node (2x8 = 16x B300 SXM6 AC):**
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Step time (avg) | _TBD_ | |
+| Samples/sec | _TBD_ | Across all 16 GPUs |
+| Tokens/sec | _TBD_ | |
+| Scaling efficiency | _TBD_ | vs. single-node baseline |
+| NCCL communication overhead | _TBD_ | Inferred from scaling efficiency |
+
+**Key caveats for all results:**
+- cuEquivariance disabled (`DISABLE_CUEQUIVARIANCE=1`) -- triangle ops use vanilla PyTorch fallback (see "Impact of Disabling cuEquivariance" in Phase 1)
+- Synthetic data (no disk I/O bottleneck) -- production throughput may be lower due to data loading
+- Training from scratch (random weights) -- gradient magnitudes may differ from fine-tuning
+- No `torch.compile` or CUDA graphs -- pure eager-mode PyTorch
+
+---
+
+## Phase 4: H200 Comparison & TCO Analysis
+
+> **Status:** Requires H200 cluster access.
+
+### Plan
+
+1. Run the same benchmark (`experiment=benchmark`) on H200 GPUs with **two configurations**:
+   - cuEquivariance **enabled** (default) -- reflects production H200 performance
+   - cuEquivariance **disabled** (`DISABLE_CUEQUIVARIANCE=1`) -- matches B300 conditions for fair hardware comparison
+
+2. Collect identical metrics as Phase 3 (step time, throughput, memory, utilization)
+
+3. Compute comparison:
+
+| Metric | B300 (no cueq) | H200 (no cueq) | H200 (with cueq) |
+|--------|----------------|-----------------|-------------------|
+| Tokens/sec | _TBD_ | _TBD_ | _TBD_ |
+| Step time | _TBD_ | _TBD_ | _TBD_ |
+| Peak memory | _TBD_ | _TBD_ | _TBD_ |
+| GPU utilization | _TBD_ | _TBD_ | _TBD_ |
+
+4. TCO analysis (cost per token-second):
+
+| Instance | GPU | $/hr (on-demand) | Tokens/sec | $/M tokens |
+|----------|-----|-------------------|------------|------------|
+| p6-b300.48xlarge | 8x B300 | _TBD_ | _TBD_ | _TBD_ |
+| p5e.48xlarge | 8x H200 | _TBD_ | _TBD_ | _TBD_ |
+
+**Note:** B300 vs H200 comparison with cuEquivariance disabled isolates the raw hardware speedup. The full comparison (B300 no-cueq vs H200 with-cueq) shows the practical gap until cuEquivariance adds Blackwell support.

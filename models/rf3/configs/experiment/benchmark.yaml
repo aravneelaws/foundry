@@ -23,6 +23,12 @@ defaults:
 ckpt_config: null
 ckpt_path: null
 
+# Disable FallbackDatasetWrapper -- synthetic data never fails, and the wrapper
+# adds overhead that pollutes benchmark throughput measurements
+dataloader:
+  train:
+    n_fallback_retries: 0
+
 # Override paths to use local FSx storage
 paths:
   log_dir: /fsx/ubuntu/training/logs

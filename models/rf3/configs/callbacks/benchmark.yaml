@@ -6,6 +6,10 @@ defaults:
   - train_logging
   - _self_
 
+# Disable dataset sampling ratios callback -- it calls parse_example_id()
+# which crashes on synthetic example IDs (expects structured PDB-based format)
+log_dataset_sampling_ratios_callback: null
+
 timing_callback:
   _target_: foundry.callbacks.timing_logging.TimingCallback
   log_every_n: 10
