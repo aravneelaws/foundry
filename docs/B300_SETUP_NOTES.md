@@ -304,7 +304,7 @@ The `ProfilingCallback` (`src/foundry/callbacks/profiling.py`) collects detailed
 
 ## Phase 3: Training Performance Results
 
-> **Status:** Single-node complete (Job 42). Multi-node pending.
+> **Status:** Complete. Single-node (Job 42) and multi-node (Job 43) benchmarks finished.
 
 ### Single-node (8x B300 SXM6 AC) -- Job 42
 
@@ -350,17 +350,48 @@ Benchmark config: `experiment=benchmark`, 4 epochs x 50 batches/GPU = 200 optimi
 
 **Profiling CSV:** `/fsx/ubuntu/training/logs/train/benchmark/2026-03-05_01-32_JOB_42/profiling_metrics.csv` (200 rows, per-step metrics)
 
-### Multi-node (2x8 = 16x B300 SXM6 AC)
+### Multi-node (2x8 = 16x B300 SXM6 AC) -- Job 43
 
-> **Status:** Pending. The `scripts/benchmark_rf3.sbatch` script needs to be updated with `ntasks-per-node=8` (same fix applied to the single-node script).
+Benchmark config: Same as single-node but with `trainer.num_nodes=2`. 4 epochs x 25 batches/GPU = 100 optimizer steps (400 examples split across 16 GPUs). DDP across 16 GPUs on 2 nodes with EFA interconnect.
+
+**Throughput & Timing** (excluding first 5 warmup steps):
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Step time (avg) | _TBD_ | |
-| Samples/sec | _TBD_ | Across all 16 GPUs |
-| Tokens/sec | _TBD_ | |
-| Scaling efficiency | _TBD_ | vs. single-node baseline |
-| NCCL communication overhead | _TBD_ | Inferred from scaling efficiency |
+| Step time (avg) | **9.55s** | Nearly identical to single-node (9.45s) |
+| Step time (median) | 9.88s | |
+| Step time (min) | 7.59s | |
+| Step time (max) | 11.26s | |
+| Samples/sec | **1.68** | Across all 16 GPUs |
+| Tokens/sec | **643** | 384 tokens/sample |
+| Peak GPU memory allocated | **23.10 GB** | Same as single-node |
+| Peak GPU memory reserved | **29.85 GB** | Marginally higher (~0.3 GB for NCCL buffers) |
+
+**Epoch Timings:**
+
+| Epoch | Wall-clock Time | Batches/GPU | Notes |
+|-------|-----------------|-------------|-------|
+| 0 | 323s | 25 | Includes warmup |
+| 1 | 243s | 25 | Steady state |
+| 2 | 238s | 25 | Steady state |
+| 3 | 248s | 25 | Steady state |
+
+**NCCL Communication:**
+- Intra-node: P2P/CUMEM (NVLink) with NVLS (NVLink SHARP), 32 channels per rank pair
+- Inter-node: NET/Libfabric/GDRDMA (EFA with GPU Direct RDMA), 32 channels per cross-node rank pair
+
+### Scaling Analysis (Single-Node vs Multi-Node)
+
+| Metric | 1 node (8 GPU) | 2 nodes (16 GPU) | Scaling factor |
+|--------|---------------|------------------|----------------|
+| **Tokens/sec** | 325 | **643** | **1.98x** |
+| **Samples/sec** | 0.85 | **1.68** | **1.98x** |
+| **Avg step time** | 9.45s | 9.55s | 1.01x overhead |
+| **Peak memory** | 23.10 GB | 23.10 GB | No overhead |
+
+**Scaling efficiency: 98.8%** (1.98x throughput with 2x GPUs). The 1.2% overhead comes from inter-node NCCL gradient all-reduce over EFA. This is excellent for a model of this size and confirms that EFA + GPU Direct RDMA works well on B300.
+
+**Profiling CSV:** `/fsx/ubuntu/training/logs/train/benchmark/2026-03-05_23-58_JOB_43/profiling_metrics.csv`
 
 **Key caveats for all results:**
 - cuEquivariance disabled (`DISABLE_CUEQUIVARIANCE=1`) -- triangle ops use vanilla PyTorch fallback (see "Impact of Disabling cuEquivariance" in Phase 1)
@@ -384,18 +415,19 @@ Benchmark config: `experiment=benchmark`, 4 epochs x 50 batches/GPU = 200 optimi
 
 3. Compute comparison:
 
-| Metric | B300 (no cueq) | H200 (no cueq) | H200 (with cueq) |
-|--------|----------------|-----------------|-------------------|
-| Tokens/sec | 325 | _TBD_ | _TBD_ |
-| Step time | 9.45s | _TBD_ | _TBD_ |
-| Peak memory | 23.10 GB | _TBD_ | _TBD_ |
-| GPU utilization | _TBD_ | _TBD_ | _TBD_ |
+| Metric | B300 1-node (no cueq) | B300 2-node (no cueq) | H200 (no cueq) | H200 (with cueq) |
+|--------|----------------------|----------------------|-----------------|-------------------|
+| Tokens/sec | 325 | 643 | _TBD_ | _TBD_ |
+| Step time | 9.45s | 9.55s | _TBD_ | _TBD_ |
+| Peak memory | 23.10 GB | 23.10 GB | _TBD_ | _TBD_ |
+| GPU utilization | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Scaling efficiency | -- | 98.8% | _TBD_ | _TBD_ |
 
 4. TCO analysis (cost per token-second):
 
-| Instance | GPU | $/hr (on-demand) | Tokens/sec | $/M tokens |
-|----------|-----|-------------------|------------|------------|
-| p6-b300.48xlarge | 8x B300 | _TBD_ | 325 | _TBD_ |
-| p5e.48xlarge | 8x H200 | _TBD_ | _TBD_ | _TBD_ |
+| Instance | GPU | $/hr (on-demand) | Tokens/sec (1 node) | Tokens/sec (2 node) | $/M tokens |
+|----------|-----|-------------------|---------------------|---------------------|------------|
+| p6-b300.48xlarge | 8x B300 | _TBD_ | 325 | 643 | _TBD_ |
+| p5e.48xlarge | 8x H200 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
 **Note:** B300 vs H200 comparison with cuEquivariance disabled isolates the raw hardware speedup. The full comparison (B300 no-cueq vs H200 with-cueq) shows the practical gap until cuEquivariance adds Blackwell support.
