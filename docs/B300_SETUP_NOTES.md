@@ -134,6 +134,21 @@ DISABLE_CUEQUIVARIANCE=1 sbatch scripts/benchmark_rf3.sbatch
 ```
 This isolates the hardware performance difference from the software optimization difference.
 
+### cu13 Build Tested -- Same LLVM Crash
+
+We also tested `cuequivariance-ops-cu13==0.9.0` and `cuequivariance-ops-torch-cu13==0.9.0` to see if the cu13 builds (which include Blackwell-optimized `triangle_attention` kernels since v0.8.0) would work on B300. **They do not** -- the same LLVM crash occurs:
+
+```
+'sm_103a' is not a recognized processor for this target (ignoring processor)
+LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.shfl.sync.bfly.i32
+```
+
+The root cause is the same for both cu12 and cu13: cuEquivariance's bundled LLVM compiler (used for JIT-compiling `uniform_1d` kernels) does not recognize the SM 10.3 architecture. The crash is a C-level `abort()` that kills the process before any Python-level fallback can intervene. This affects **all** cuEquivariance fused kernel paths on SM 10.3 (B300), not just `triangle_multiplicative_update`.
+
+This has been reported upstream: [NVIDIA/cuEquivariance#255](https://github.com/NVIDIA/cuEquivariance/issues/255) (see also [#209](https://github.com/NVIDIA/cuEquivariance/issues/209) for the equivalent JAX issue on B200/B300).
+
+**`DISABLE_CUEQUIVARIANCE=1` remains the only working path on B300 until NVIDIA updates the LLVM backend.**
+
 ### Software Versions (in venv)
 
 | Package | Version |
