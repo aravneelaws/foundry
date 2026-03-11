@@ -1,3 +1,4 @@
+import logging
 import math
 
 import torch
@@ -7,6 +8,8 @@ from einops import rearrange
 from jaxtyping import Float
 from opt_einsum import contract as einsum
 from rf3.util_module import init_lecun_normal
+
+logger = logging.getLogger(__name__)
 
 from foundry import SHOULD_USE_CUEQUIVARIANCE
 from foundry.training.checkpoint import activation_checkpointing
@@ -86,7 +89,18 @@ class TriangleAttention(nn.Module):
 
         # Route to appropriate implementation
         if self.use_cuequivariance and SHOULD_USE_CUEQUIVARIANCE:
-            out = self._forward_cuequivariance(pair, bias)
+            try:
+                out = self._forward_cuequivariance(pair, bias)
+            except Exception as e:
+                if not getattr(self, "_cueq_fallback_warned", False):
+                    logger.warning(
+                        "TriangleAttention cuEquivariance failed (%s), "
+                        "falling back to vanilla PyTorch for remaining steps.",
+                        e,
+                    )
+                    self._cueq_fallback_warned = True
+                self.use_cuequivariance = False
+                out = self._forward_vanilla(pair, bias)
         else:
             out = self._forward_vanilla(pair, bias)
 
@@ -105,9 +119,9 @@ class TriangleAttention(nn.Module):
             pair = pair.to(dtype=dtype)
             bias = bias.to(dtype=dtype)
 
-        assert (
-            pair.dtype == torch.bfloat16 and bias.dtype == torch.bfloat16
-        ), f"cuEquivariance requires bfloat16 inputs (got pair={pair.dtype}, bias={bias.dtype})"
+        assert pair.dtype == torch.bfloat16 and bias.dtype == torch.bfloat16, (
+            f"cuEquivariance requires bfloat16 inputs (got pair={pair.dtype}, bias={bias.dtype})"
+        )
 
         # Gate computation
         gate = torch.sigmoid(self.to_g(pair))  # (B, L, L, h*dim)
@@ -195,13 +209,13 @@ class TriangleMultiplication(nn.Module):
 
         if self.use_cuequivariance:
             # cuEquivariance kernel requires d_pair == d_hidden...
-            assert (
-                d_pair == d_hidden
-            ), "cuEquivariance triangle multiplication requires d_pair == d_hidden"
+            assert d_pair == d_hidden, (
+                "cuEquivariance triangle multiplication requires d_pair == d_hidden"
+            )
             # ... and d_pair must be a multiple of 32
-            assert (
-                d_pair % 32 == 0
-            ), "cuEquivariance triangle multiplication requires d_pair to be a multiple of 32"
+            assert d_pair % 32 == 0, (
+                "cuEquivariance triangle multiplication requires d_pair to be a multiple of 32"
+            )
 
         # Input normalization (optional bias)
         self.norm_in = nn.LayerNorm(d_pair, bias=bias)
@@ -236,7 +250,18 @@ class TriangleMultiplication(nn.Module):
         """Forward pass of triangle multiplication."""
         # Route to appropriate implementation
         if self.use_cuequivariance and SHOULD_USE_CUEQUIVARIANCE:
-            return self._forward_cuequivariance(pair)
+            try:
+                return self._forward_cuequivariance(pair)
+            except Exception as e:
+                if not getattr(self, "_cueq_fallback_warned", False):
+                    logger.warning(
+                        "TriangleMultiplication cuEquivariance failed (%s), "
+                        "falling back to vanilla PyTorch for remaining steps.",
+                        e,
+                    )
+                    self._cueq_fallback_warned = True
+                self.use_cuequivariance = False
+                return self._forward_vanilla(pair)
         else:
             return self._forward_vanilla(pair)
 
@@ -291,9 +316,9 @@ class TriangleMultiplication(nn.Module):
             dtype = torch.get_autocast_dtype("cuda")
             pair = pair.to(dtype=dtype)
 
-        assert (
-            pair.dtype == torch.bfloat16
-        ), "cuEquivariance requires bfloat16 inputs for optimal performance"
+        assert pair.dtype == torch.bfloat16, (
+            "cuEquivariance requires bfloat16 inputs for optimal performance"
+        )
 
         output = cuet.triangle_multiplicative_update(
             x=pair,
