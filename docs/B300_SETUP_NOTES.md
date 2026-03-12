@@ -134,36 +134,76 @@ DISABLE_CUEQUIVARIANCE=1 sbatch scripts/benchmark_rf3.sbatch
 ```
 This isolates the hardware performance difference from the software optimization difference.
 
-### cu13 Build Tested -- Same LLVM Crash
+### cu13 Build Tested -- Same LLVM Crash (with PyTorch cu128)
 
-We also tested `cuequivariance-ops-cu13==0.9.0` and `cuequivariance-ops-torch-cu13==0.9.0` to see if the cu13 builds (which include Blackwell-optimized `triangle_attention` kernels since v0.8.0) would work on B300. **They do not** -- the same LLVM crash occurs:
+We initially tested `cuequivariance-ops-cu13==0.9.0` and `cuequivariance-ops-torch-cu13==0.9.0` with PyTorch 2.7.1+cu128. **This combination crashes** with the same LLVM error:
 
 ```
 'sm_103a' is not a recognized processor for this target (ignoring processor)
 LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.shfl.sync.bfly.i32
 ```
 
-The root cause is the same for both cu12 and cu13: cuEquivariance's bundled LLVM compiler (used for JIT-compiling `uniform_1d` kernels) does not recognize the SM 10.3 architecture. The crash is a C-level `abort()` that kills the process before any Python-level fallback can intervene. This affects **all** cuEquivariance fused kernel paths on SM 10.3 (B300), not just `triangle_multiplicative_update`.
+The root cause was that PyTorch cu128 bundles NVRTC 12.8, which does not support SM 10.3. Even though cuEquivariance cu13 links against NVRTC 13, the PyTorch-bundled NVRTC 12.8 was being used for kernel compilation, causing the LLVM crash.
 
-This has been reported upstream: [NVIDIA/cuEquivariance#255](https://github.com/NVIDIA/cuEquivariance/issues/255) (see also [#209](https://github.com/NVIDIA/cuEquivariance/issues/209) for the equivalent JAX issue on B200/B300).
+This was reported upstream: [NVIDIA/cuEquivariance#255](https://github.com/NVIDIA/cuEquivariance/issues/255).
 
-**`DISABLE_CUEQUIVARIANCE=1` remains the only working path on B300 until NVIDIA updates the LLVM backend.**
+### Resolution: PyTorch cu130 + cuEquivariance cu13
 
-### Software Versions (in venv)
+Following guidance from NVIDIA engineers on issue #255, we upgraded to **PyTorch 2.9.1+cu130** (which bundles NVRTC 13.0 natively) alongside cuEquivariance cu13. This resolved the LLVM crash completely.
+
+**The fix: use PyTorch cu130 (not cu128) with cuEquivariance cu13 on Blackwell GPUs.**
+
+The upgraded environment:
+
+| Package | Previous (broken) | Updated (working) |
+|---------|-------------------|-------------------|
+| PyTorch | 2.7.1+cu128 | **2.9.1+cu130** |
+| CUDA runtime | 12.8 | **13.0** |
+| Triton | 3.3.1 | **3.5.1** |
+| cuequivariance-ops | cu12 0.9.0 | **cu13 0.9.0** |
+| cuequivariance-ops-torch | cu12 0.9.0 | **cu13 0.9.0** |
+| Lightning | 2.6.1 | 2.6.1 (unchanged) |
+| NVRTC swap needed? | Yes (manual swap) | **No (native cu130)** |
+| cuEquivariance works? | No (LLVM crash) | **Yes -- both triangle_attention and triangle_multiplicative_update** |
+
+The cu130 venv is at `/fsx/ubuntu/venvs/foundry-cu130/`. The original cu128 venv at `/fsx/ubuntu/venvs/foundry/` is preserved as a fallback.
+
+**Setup commands for the cu130 environment:**
+```bash
+# Create fresh venv
+uv venv --python 3.12 /fsx/ubuntu/venvs/foundry-cu130
+
+# Install Foundry
+cd /fsx/ubuntu/projects/foundry
+uv pip install --python /fsx/ubuntu/venvs/foundry-cu130/bin/python -e '.[rf3,dev]'
+
+# Install PyTorch cu130 (replaces default cu126/cu128)
+uv pip install --python /fsx/ubuntu/venvs/foundry-cu130/bin/python \
+  torch==2.9.1+cu130 --index-url https://download.pytorch.org/whl/cu130
+
+# Install cuEquivariance cu13
+uv pip install --python /fsx/ubuntu/venvs/foundry-cu130/bin/python \
+  cuequivariance-ops-cu13==0.9.0 cuequivariance-ops-torch-cu13==0.9.0
+```
+
+### Software Versions
+
+**Recommended environment (cu130 -- cuEquivariance enabled):**
 
 | Package | Version |
 |---------|---------|
 | Python | 3.12.13 |
-| PyTorch | 2.7.1+cu128 |
+| PyTorch | **2.9.1+cu130** |
+| CUDA runtime | **13.0** |
+| Triton | **3.5.1** |
 | Lightning | 2.6.1 |
 | Hydra | 1.3.2 |
-| NCCL | 2.26.2 |
 | cuequivariance | 0.9.0 |
-| cuequivariance-ops-cu12 | 0.9.0 |
+| cuequivariance-ops-cu13 | **0.9.0** |
+| cuequivariance-ops-torch-cu13 | **0.9.0** |
 | cuequivariance-torch | 0.9.0 |
 | atomworks | >=2.1.1 |
-| wandb | 0.25.0 |
-| rc-foundry | 0.0.1.dev1144+g75986084a (editable) |
+| rc-foundry | 0.0.1.dev (editable) |
 
 ---
 
@@ -319,7 +359,7 @@ The `ProfilingCallback` (`src/foundry/callbacks/profiling.py`) collects detailed
 
 ## Phase 3: Training Performance Results
 
-> **Status:** Complete. Single-node (Job 42) and multi-node (Job 43) benchmarks finished.
+> **Status:** Complete. All B300 benchmark configurations finished.
 
 ### Single-node (8x B300 SXM6 AC) -- Job 42
 
@@ -408,11 +448,53 @@ Benchmark config: Same as single-node but with `trainer.num_nodes=2`. 4 epochs x
 
 **Profiling CSV:** `/fsx/ubuntu/training/logs/train/benchmark/2026-03-05_23-58_JOB_43/profiling_metrics.csv`
 
-**Key caveats for all results:**
+**Key caveats for results above (cu128, cuEquivariance disabled):**
 - cuEquivariance disabled (`DISABLE_CUEQUIVARIANCE=1`) -- triangle ops use vanilla PyTorch fallback (see "Impact of Disabling cuEquivariance" in Phase 1)
 - Synthetic data (no disk I/O bottleneck) -- production throughput may be lower due to data loading
 - Training from scratch (random weights) -- gradient magnitudes may differ from fine-tuning
 - No `torch.compile` or CUDA graphs -- pure eager-mode PyTorch
+
+### B300 with cuEquivariance Enabled (PyTorch cu130)
+
+After resolving the cuEquivariance LLVM crash by upgrading to PyTorch 2.9.1+cu130 (see "Resolution: PyTorch cu130 + cuEquivariance cu13" in Phase 1), we re-ran the benchmarks with cuEquivariance **enabled**.
+
+**Environment:** PyTorch 2.9.1+cu130, cuequivariance-ops-cu13 0.9.0, Triton 3.5.1. Venv: `/fsx/ubuntu/venvs/foundry-cu130/`.
+
+**Single-node (8x B300, cuEquivariance enabled):**
+
+| Metric | Value |
+|--------|-------|
+| Avg step time | **3.70s** |
+| Median step time | 3.74s |
+| Min / Max step time | 2.94s / 4.54s |
+| Samples/sec | **2.16** |
+| Tokens/sec | **831** |
+| Peak GPU memory allocated | 23.10 GB |
+| Peak GPU memory reserved | 29.90 GB |
+
+**2-node (16x B300, cuEquivariance enabled):**
+
+| Metric | Value |
+|--------|-------|
+| Avg step time | **3.75s** |
+| Median step time | 3.75s |
+| Min / Max step time | 3.05s / 4.36s |
+| Samples/sec | **4.27** |
+| Tokens/sec | **1,639** |
+| Peak GPU memory allocated | 23.10 GB |
+| Peak GPU memory reserved | 29.90 GB |
+
+**cuEquivariance speedup on B300:**
+
+| Metric | B300 no-cueq (cu128) | B300 with-cueq (cu130) | Speedup |
+|--------|---------------------|----------------------|---------|
+| Tokens/sec (1-node) | 325 | **831** | **2.56x** |
+| Tokens/sec (2-node) | 643 | **1,639** | **2.55x** |
+| Avg step time (1-node) | 9.45s | **3.70s** | **2.55x faster** |
+
+cuEquivariance provides a **2.5x speedup** on B300 -- even larger than the ~2x speedup observed on H200. This is likely due to the Blackwell-optimized fused kernels (added in cuEquivariance v0.8.0 for SM 10.0/10.3) delivering additional performance beyond the standard Hopper kernels.
+
+**Scaling efficiency (cu130 with cuEquivariance):** 98.7% (1,639 / (831 * 2) = 98.7%).
 
 ---
 
@@ -484,21 +566,21 @@ This isolates the raw GPU hardware performance by running the same vanilla PyTor
 
 **B300 delivers ~14% higher raw hardware throughput than H200** when running the same software path.
 
-### Comparison 2: Practical (H200 with cuEquivariance vs B300 without)
+### Comparison 2: Both with cuEquivariance (B300 cu130 vs H200 cu128)
 
-This reflects what users experience today: H200 with full software optimization vs B300 with vanilla PyTorch fallback.
+This reflects the best achievable performance on each GPU with cuEquivariance enabled.
 
-| Metric | B300 1-node (no cueq) | H200 1-node (with cueq) | H200 advantage |
-|--------|----------------------|------------------------|----------------|
-| Avg step time | 9.45s | **5.56s** | **41.1% faster** |
-| Tokens/sec | 325 | **552** | **69.8% higher** |
+| Metric | B300 1-node (cu130 + cueq) | H200 1-node (cu128 + cueq) | B300 advantage |
+|--------|---------------------------|---------------------------|----------------|
+| Avg step time | **3.70s** | 5.56s | **33.5% faster** |
+| Tokens/sec | **831** | 552 | **50.5% higher** |
 
-| Metric | B300 2-node (no cueq) | H200 2-node (with cueq) | H200 advantage |
-|--------|----------------------|------------------------|----------------|
-| Avg step time | 9.55s | **5.58s** | **41.6% faster** |
-| Tokens/sec | 643 | **1,102** | **71.4% higher** |
+| Metric | B300 2-node (cu130 + cueq) | H200 2-node (cu128 + cueq) | B300 advantage |
+|--------|---------------------------|---------------------------|----------------|
+| Avg step time | **3.75s** | 5.58s | **32.8% faster** |
+| Tokens/sec | **1,639** | 1,102 | **48.7% higher** |
 
-**H200 with cuEquivariance is ~70% faster than B300 without it** in practice today.
+**B300 with cuEquivariance is ~50% faster than H200 with cuEquivariance.** The Blackwell-optimized fused kernels (added in cuEquivariance v0.8.0 for SM 10.0/10.3) deliver significant additional speedup beyond the ~14% raw hardware advantage.
 
 ### cuEquivariance Impact on H200
 
@@ -507,23 +589,40 @@ This reflects what users experience today: H200 with full software optimization 
 | Tokens/sec (1-node) | 285 | **552** | **1.94x** |
 | Tokens/sec (2-node) | 561 | **1,102** | **1.96x** |
 
-cuEquivariance nearly doubles throughput on H200 by fusing triangle attention and triangle multiplication into single kernel launches. This is the performance B300 would gain once cuEquivariance adds SM 10.3 support ([NVIDIA/cuEquivariance#255](https://github.com/NVIDIA/cuEquivariance/issues/255)).
+### cuEquivariance Impact on B300
+
+| Metric | B300 no-cueq (cu128) | B300 with-cueq (cu130) | Speedup |
+|--------|---------------------|----------------------|---------|
+| Tokens/sec (1-node) | 325 | **831** | **2.56x** |
+| Tokens/sec (2-node) | 643 | **1,639** | **2.55x** |
+
+cuEquivariance provides a larger speedup on B300 (2.5x) than on H200 (1.9x), likely due to the Blackwell-optimized kernels in cuEquivariance v0.8.0.
 
 ### Scaling Efficiency
 
 | Config | 1-node tokens/sec | 2-node tokens/sec | Efficiency |
 |--------|-------------------|-------------------|------------|
-| B300 no-cueq | 325 | 643 | **98.8%** |
+| B300 no-cueq (cu128) | 325 | 643 | **98.8%** |
+| B300 with-cueq (cu130) | 831 | 1,639 | **98.7%** |
 | H200 no-cueq | 285 | 561 | **98.4%** |
 | H200 with-cueq | 552 | 1,102 | **99.8%** |
 
 Near-linear scaling across all configurations on both GPU types, confirming EFA + GPU Direct RDMA works well on both HyperPod (B300) and ParallelCluster (H200).
 
+### Summary: All Configurations
+
+| Config | Avg step (1n) | Tokens/sec (1n) | Tokens/sec (2n) |
+|--------|--------------|-----------------|-----------------|
+| **B300 cu130 + cueq** | **3.70s** | **831** | **1,639** |
+| H200 cu128 + cueq | 5.56s | 552 | 1,102 |
+| B300 cu128 no-cueq | 9.45s | 325 | 643 |
+| H200 cu128 no-cueq | 10.78s | 285 | 561 |
+
 ### Key Takeaways
 
-1. **B300 raw hardware is ~14% faster than H200** when running the same code path (vanilla PyTorch, cuEquivariance disabled on both).
-2. **cuEquivariance provides ~2x speedup** on H200 for RF3's triangle attention and triangle multiplication operations.
-3. **Today's practical gap: H200 is ~70% faster than B300** because cuEquivariance works on H200 (SM 9.0) but crashes on B300 (SM 10.3) due to an LLVM backend limitation.
-4. **Once cuEquivariance supports SM 10.3**, B300 should overtake H200 by ~14% (matching the raw hardware advantage), and potentially more if NVIDIA ships Blackwell-specific optimized kernels.
-5. **Memory usage is identical** across both GPUs (~23 GB per GPU), leaving significant headroom for larger workloads.
-6. **Scaling efficiency is excellent** on both platforms (>98%), confirming EFA works equivalently on both cluster types.
+1. **B300 with cuEquivariance is ~50% faster than H200 with cuEquivariance** (831 vs 552 tokens/sec single-node). This is the headline result.
+2. **B300 raw hardware is ~14% faster than H200** when running the same code path (vanilla PyTorch, cuEquivariance disabled on both).
+3. **cuEquivariance provides 2.5x speedup on B300** (vs 1.9x on H200), thanks to Blackwell-optimized fused kernels in cuEquivariance v0.8.0.
+4. **PyTorch cu130 is required** to enable cuEquivariance on Blackwell. PyTorch cu128 causes an LLVM crash because its bundled NVRTC 12.8 doesn't support SM 10.3. See "Resolution: PyTorch cu130 + cuEquivariance cu13" in Phase 1.
+5. **Memory usage is identical** across all configurations (~23 GB per GPU), leaving significant headroom for larger workloads.
+6. **Scaling efficiency is excellent** on all platforms and configurations (>98%), confirming EFA works equivalently on both HyperPod and ParallelCluster.
