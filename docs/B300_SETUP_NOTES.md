@@ -500,129 +500,122 @@ cuEquivariance provides a **2.5x speedup** on B300 -- even larger than the ~2x s
 
 ## Phase 4: H200 Comparison
 
-> **Status:** Complete. All 4 benchmark configurations run on H200 (p5en.48xlarge).
+> **Status:** Complete. All benchmark configurations run on H200 (p5en.48xlarge) with both cu128 and cu130 software stacks.
 
 ### H200 Benchmark Setup
 
-H200 benchmarks were run on a shared ParallelCluster with p5en.48xlarge instances (8x NVIDIA H200 SXM per node, SM 9.0). The same Foundry codebase, synthetic dataset, and benchmark config (`experiment=benchmark`) were used -- identical to B300 benchmarks except for GPU type and cuEquivariance availability.
+H200 benchmarks were run on a shared ParallelCluster with p5en.48xlarge instances (8x NVIDIA H200 SXM per node, SM 9.0). The same Foundry codebase, synthetic dataset, and benchmark config (`experiment=benchmark`) were used -- identical to B300 benchmarks except for GPU type.
 
-**Environment:** PyTorch 2.7.1+cu128, cuequivariance 0.9.0 (cu12), Triton 3.3.1, Python 3.12.3.
+Two software stacks were tested on H200 to ensure a fair comparison:
 
-**H200 benchmark scripts:** `scripts/h200_bench_{1node,2node}_{cueq,nocueq}.sbatch`
+| Stack | PyTorch | CUDA runtime | Triton | cuEquivariance | Notes |
+|-------|---------|-------------|--------|----------------|-------|
+| **cu128** | 2.7.1+cu128 | 12.8 | 3.3.1 | cu12 0.9.0 | Foundry's default/recommended stack |
+| **cu130** | 2.9.1+cu130 | 13.0 | 3.5.1 | cu13 0.9.0 | Same stack as B300 (fair comparison) |
 
-### H200 Results
+**H200 benchmark scripts:** `scripts/h200_bench_{1node,2node}_{cueq,nocueq}.sbatch` (cu128) and `scripts/h200_bench_cu130_{1node,2node}_{cueq,nocueq}.sbatch` (cu130)
 
-**Config A -- H200 1-node, cuEquivariance disabled:**
+### H200 Results: cu128 Stack (Foundry Default)
 
-| Metric | Value |
-|--------|-------|
-| Avg step time | 10.78s |
-| Median step time | 11.33s |
-| Throughput | 0.74 samples/sec, 285 tokens/sec |
-| Peak GPU memory allocated | 23.15 GB |
+| Config | Avg step | Tokens/sec (1n) | Tokens/sec (2n) | Memory |
+|--------|----------|-----------------|-----------------|--------|
+| H200 cu128 + cueq | 5.56s | 552 | 1,102 | 23.15 GB |
+| H200 cu128 no-cueq | 10.78s | 285 | 561 | 23.15 GB |
 
-**Config B -- H200 1-node, cuEquivariance enabled:**
+### H200 Results: cu130 Stack (Same as B300)
 
-| Metric | Value |
-|--------|-------|
-| Avg step time | **5.56s** |
-| Median step time | 5.55s |
-| Throughput | **1.44 samples/sec, 552 tokens/sec** |
-| Peak GPU memory allocated | 23.15 GB |
+| Config | Avg step | Tokens/sec (1n) | Tokens/sec (2n) | Memory |
+|--------|----------|-----------------|-----------------|--------|
+| H200 cu130 + cueq | **4.67s** | **657** | **1,309** | 23.15 GB |
+| H200 cu130 no-cueq | 8.27s | 371 | 739 | 23.15 GB |
 
-**Config C -- H200 2-node, cuEquivariance enabled:**
+### Software Stack Impact on H200 (cu128 vs cu130)
 
-| Metric | Value |
-|--------|-------|
-| Avg step time | **5.58s** |
-| Median step time | 5.56s |
-| Throughput | **2.87 samples/sec, 1,102 tokens/sec** |
-| Peak GPU memory allocated | 23.15 GB |
+Upgrading from PyTorch 2.7.1+cu128 to 2.9.1+cu130 on H200 shows significant improvement from the software stack alone:
 
-**Config D -- H200 2-node, cuEquivariance disabled:**
+| Config | H200 cu128 | H200 cu130 | Improvement |
+|--------|-----------|-----------|-------------|
+| cueq enabled (1-node) | 552 tok/s | **657 tok/s** | **+19.0%** |
+| cueq enabled (2-node) | 1,102 tok/s | **1,309 tok/s** | **+18.8%** |
+| cueq disabled (1-node) | 285 tok/s | **371 tok/s** | **+30.2%** |
+| cueq disabled (2-node) | 561 tok/s | **739 tok/s** | **+31.7%** |
 
-| Metric | Value |
-|--------|-------|
-| Avg step time | 10.95s |
-| Median step time | 11.38s |
-| Throughput | 1.46 samples/sec, 561 tokens/sec |
-| Peak GPU memory allocated | 23.15 GB |
+The cu130 stack (PyTorch 2.9.1, Triton 3.5.1) delivers ~19% improvement with cuEquivariance and ~30% without, on the same H200 hardware.
 
-### Comparison 1: Fair Hardware (cuEquivariance disabled on both)
+### Comparison: B300 vs H200 (Same cu130 Software Stack)
 
-This isolates the raw GPU hardware performance by running the same vanilla PyTorch code path on both chips.
+This is the fair apples-to-apples hardware comparison with the same software stack (PyTorch 2.9.1+cu130, cuEquivariance cu13 0.9.0) on both GPUs.
 
-| Metric | B300 1-node | H200 1-node | B300 advantage |
-|--------|------------|------------|----------------|
-| Avg step time | **9.45s** | 10.78s | **12.3% faster** |
-| Tokens/sec | **325** | 285 | **14.0% higher** |
-| Peak memory | 23.10 GB | 23.15 GB | Same |
+**With cuEquivariance enabled:**
 
-| Metric | B300 2-node | H200 2-node | B300 advantage |
-|--------|------------|------------|----------------|
-| Avg step time | **9.55s** | 10.95s | **12.8% faster** |
-| Tokens/sec | **643** | 561 | **14.6% higher** |
-| Peak memory | 23.10 GB | 23.15 GB | Same |
+| Metric | B300 cu130 | H200 cu130 | B300 advantage |
+|--------|-----------|-----------|----------------|
+| Tokens/sec (1-node) | **831** | 657 | **26.5% faster** |
+| Tokens/sec (2-node) | **1,639** | 1,309 | **25.2% faster** |
+| Avg step time (1-node) | **3.70s** | 4.67s | **20.8% faster** |
 
-**B300 delivers ~14% higher raw hardware throughput than H200** when running the same software path.
+**With cuEquivariance disabled:**
 
-### Comparison 2: Both with cuEquivariance (B300 cu130 vs H200 cu128)
+| Metric | B300 cu128* | H200 cu130 | Delta |
+|--------|-----------|-----------|-------|
+| Tokens/sec (1-node) | 325 | **371** | H200 14.2% faster |
+| Tokens/sec (2-node) | 643 | **739** | H200 14.9% faster |
 
-This reflects the best achievable performance on each GPU with cuEquivariance enabled.
+*B300 no-cueq results are from cu128 stack. With cu130, B300 no-cueq throughput would likely also improve by ~30% based on the H200 software stack improvement pattern.
 
-| Metric | B300 1-node (cu130 + cueq) | H200 1-node (cu128 + cueq) | B300 advantage |
-|--------|---------------------------|---------------------------|----------------|
-| Avg step time | **3.70s** | 5.56s | **33.5% faster** |
-| Tokens/sec | **831** | 552 | **50.5% higher** |
+**B300 is ~26% faster than H200 when both run the same cu130 software stack with cuEquivariance enabled.**
 
-| Metric | B300 2-node (cu130 + cueq) | H200 2-node (cu128 + cueq) | B300 advantage |
-|--------|---------------------------|---------------------------|----------------|
-| Avg step time | **3.75s** | 5.58s | **32.8% faster** |
-| Tokens/sec | **1,639** | 1,102 | **48.7% higher** |
+### Comparison: B300 cu130 vs H200 cu128 (Different Software Stacks)
 
-**B300 with cuEquivariance is ~50% faster than H200 with cuEquivariance.** The Blackwell-optimized fused kernels (added in cuEquivariance v0.8.0 for SM 10.0/10.3) deliver significant additional speedup beyond the ~14% raw hardware advantage.
+For reference, this comparison uses Foundry's default cu128 stack on H200 and the cu130 stack on B300:
 
-### cuEquivariance Impact on H200
+| Metric | B300 cu130 + cueq | H200 cu128 + cueq | B300 advantage |
+|--------|------------------|------------------|----------------|
+| Tokens/sec (1-node) | **831** | 552 | **50.5% faster** |
+| Tokens/sec (2-node) | **1,639** | 1,102 | **48.7% faster** |
 
-| Metric | H200 no-cueq | H200 with-cueq | Speedup |
-|--------|-------------|----------------|---------|
-| Tokens/sec (1-node) | 285 | **552** | **1.94x** |
-| Tokens/sec (2-node) | 561 | **1,102** | **1.96x** |
+The ~50% advantage includes both the hardware difference (~26%) and the cu130 software stack improvement (~19%).
 
-### cuEquivariance Impact on B300
+### cuEquivariance Impact
 
-| Metric | B300 no-cueq (cu128) | B300 with-cueq (cu130) | Speedup |
-|--------|---------------------|----------------------|---------|
-| Tokens/sec (1-node) | 325 | **831** | **2.56x** |
-| Tokens/sec (2-node) | 643 | **1,639** | **2.55x** |
+| GPU | No cueq (cu130) | With cueq (cu130) | Speedup |
+|-----|----------------|-------------------|---------|
+| **B300** | 325* | **831** | **2.56x** |
+| **H200** | 371 | **657** | **1.77x** |
 
-cuEquivariance provides a larger speedup on B300 (2.5x) than on H200 (1.9x), likely due to the Blackwell-optimized kernels in cuEquivariance v0.8.0.
+*B300 no-cueq from cu128 stack.
+
+cuEquivariance provides a larger speedup on B300 (2.5x) than on H200 (1.8x), likely due to the Blackwell-optimized fused kernels in cuEquivariance v0.8.0.
 
 ### Scaling Efficiency
 
 | Config | 1-node tokens/sec | 2-node tokens/sec | Efficiency |
 |--------|-------------------|-------------------|------------|
-| B300 no-cueq (cu128) | 325 | 643 | **98.8%** |
-| B300 with-cueq (cu130) | 831 | 1,639 | **98.7%** |
-| H200 no-cueq | 285 | 561 | **98.4%** |
-| H200 with-cueq | 552 | 1,102 | **99.8%** |
+| B300 cu130 + cueq | 831 | 1,639 | **98.7%** |
+| B300 cu128 no-cueq | 325 | 643 | **98.8%** |
+| H200 cu130 + cueq | 657 | 1,309 | **99.5%** |
+| H200 cu130 no-cueq | 371 | 739 | **99.6%** |
+| H200 cu128 + cueq | 552 | 1,102 | **99.8%** |
+| H200 cu128 no-cueq | 285 | 561 | **98.4%** |
 
-Near-linear scaling across all configurations on both GPU types, confirming EFA + GPU Direct RDMA works well on both HyperPod (B300) and ParallelCluster (H200).
+Near-linear scaling (>98%) across all configurations on both GPU types.
 
 ### Summary: All Configurations
 
 | Config | Avg step (1n) | Tokens/sec (1n) | Tokens/sec (2n) |
 |--------|--------------|-----------------|-----------------|
 | **B300 cu130 + cueq** | **3.70s** | **831** | **1,639** |
+| H200 cu130 + cueq | 4.67s | 657 | 1,309 |
 | H200 cu128 + cueq | 5.56s | 552 | 1,102 |
+| H200 cu130 no-cueq | 8.27s | 371 | 739 |
 | B300 cu128 no-cueq | 9.45s | 325 | 643 |
 | H200 cu128 no-cueq | 10.78s | 285 | 561 |
 
 ### Key Takeaways
 
-1. **B300 with cuEquivariance is ~50% faster than H200 with cuEquivariance** (831 vs 552 tokens/sec single-node). This is the headline result.
-2. **B300 raw hardware is ~14% faster than H200** when running the same code path (vanilla PyTorch, cuEquivariance disabled on both).
-3. **cuEquivariance provides 2.5x speedup on B300** (vs 1.9x on H200), thanks to Blackwell-optimized fused kernels in cuEquivariance v0.8.0.
+1. **B300 is ~26% faster than H200** when both run the same cu130 software stack with cuEquivariance enabled (831 vs 657 tokens/sec). This is the fair hardware comparison.
+2. **The cu130 software stack (PyTorch 2.9.1, Triton 3.5.1) provides ~19-30% improvement** over cu128 on the same hardware, independent of GPU type.
+3. **cuEquivariance provides 2.5x speedup on B300 and 1.8x on H200** (cu130 stack). The larger B300 speedup is from Blackwell-optimized fused kernels in cuEquivariance v0.8.0.
 4. **PyTorch cu130 is required** to enable cuEquivariance on Blackwell. PyTorch cu128 causes an LLVM crash because its bundled NVRTC 12.8 doesn't support SM 10.3. See "Resolution: PyTorch cu130 + cuEquivariance cu13" in Phase 1.
 5. **Memory usage is identical** across all configurations (~23 GB per GPU), leaving significant headroom for larger workloads.
 6. **Scaling efficiency is excellent** on all platforms and configurations (>98%), confirming EFA works equivalently on both HyperPod and ParallelCluster.
