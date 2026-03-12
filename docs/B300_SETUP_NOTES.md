@@ -416,33 +416,114 @@ Benchmark config: Same as single-node but with `trainer.num_nodes=2`. 4 epochs x
 
 ---
 
-## Phase 4: H200 Comparison & TCO Analysis
+## Phase 4: H200 Comparison
 
-> **Status:** Requires H200 cluster access.
+> **Status:** Complete. All 4 benchmark configurations run on H200 (p5en.48xlarge).
 
-### Plan
+### H200 Benchmark Setup
 
-1. Run the same benchmark (`experiment=benchmark`) on H200 GPUs with **two configurations**:
-   - cuEquivariance **enabled** (default) -- reflects production H200 performance
-   - cuEquivariance **disabled** (`DISABLE_CUEQUIVARIANCE=1`) -- matches B300 conditions for fair hardware comparison
+H200 benchmarks were run on a shared ParallelCluster with p5en.48xlarge instances (8x NVIDIA H200 SXM per node, SM 9.0). The same Foundry codebase, synthetic dataset, and benchmark config (`experiment=benchmark`) were used -- identical to B300 benchmarks except for GPU type and cuEquivariance availability.
 
-2. Collect identical metrics as Phase 3 (step time, throughput, memory, utilization)
+**Environment:** PyTorch 2.7.1+cu128, cuequivariance 0.9.0 (cu12), Triton 3.3.1, Python 3.12.3.
 
-3. Compute comparison:
+**H200 benchmark scripts:** `scripts/h200_bench_{1node,2node}_{cueq,nocueq}.sbatch`
 
-| Metric | B300 1-node (no cueq) | B300 2-node (no cueq) | H200 (no cueq) | H200 (with cueq) |
-|--------|----------------------|----------------------|-----------------|-------------------|
-| Tokens/sec | 325 | 643 | _TBD_ | _TBD_ |
-| Step time | 9.45s | 9.55s | _TBD_ | _TBD_ |
-| Peak memory | 23.10 GB | 23.10 GB | _TBD_ | _TBD_ |
-| GPU utilization | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| Scaling efficiency | -- | 98.8% | _TBD_ | _TBD_ |
+### H200 Results
 
-4. TCO analysis (cost per token-second):
+**Config A -- H200 1-node, cuEquivariance disabled:**
 
-| Instance | GPU | $/hr (on-demand) | Tokens/sec (1 node) | Tokens/sec (2 node) | $/M tokens |
-|----------|-----|-------------------|---------------------|---------------------|------------|
-| p6-b300.48xlarge | 8x B300 | _TBD_ | 325 | 643 | _TBD_ |
-| p5e.48xlarge | 8x H200 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Metric | Value |
+|--------|-------|
+| Avg step time | 10.78s |
+| Median step time | 11.33s |
+| Throughput | 0.74 samples/sec, 285 tokens/sec |
+| Peak GPU memory allocated | 23.15 GB |
 
-**Note:** B300 vs H200 comparison with cuEquivariance disabled isolates the raw hardware speedup. The full comparison (B300 no-cueq vs H200 with-cueq) shows the practical gap until cuEquivariance adds Blackwell support.
+**Config B -- H200 1-node, cuEquivariance enabled:**
+
+| Metric | Value |
+|--------|-------|
+| Avg step time | **5.56s** |
+| Median step time | 5.55s |
+| Throughput | **1.44 samples/sec, 552 tokens/sec** |
+| Peak GPU memory allocated | 23.15 GB |
+
+**Config C -- H200 2-node, cuEquivariance enabled:**
+
+| Metric | Value |
+|--------|-------|
+| Avg step time | **5.58s** |
+| Median step time | 5.56s |
+| Throughput | **2.87 samples/sec, 1,102 tokens/sec** |
+| Peak GPU memory allocated | 23.15 GB |
+
+**Config D -- H200 2-node, cuEquivariance disabled:**
+
+| Metric | Value |
+|--------|-------|
+| Avg step time | 10.95s |
+| Median step time | 11.38s |
+| Throughput | 1.46 samples/sec, 561 tokens/sec |
+| Peak GPU memory allocated | 23.15 GB |
+
+### Comparison 1: Fair Hardware (cuEquivariance disabled on both)
+
+This isolates the raw GPU hardware performance by running the same vanilla PyTorch code path on both chips.
+
+| Metric | B300 1-node | H200 1-node | B300 advantage |
+|--------|------------|------------|----------------|
+| Avg step time | **9.45s** | 10.78s | **12.3% faster** |
+| Tokens/sec | **325** | 285 | **14.0% higher** |
+| Peak memory | 23.10 GB | 23.15 GB | Same |
+
+| Metric | B300 2-node | H200 2-node | B300 advantage |
+|--------|------------|------------|----------------|
+| Avg step time | **9.55s** | 10.95s | **12.8% faster** |
+| Tokens/sec | **643** | 561 | **14.6% higher** |
+| Peak memory | 23.10 GB | 23.15 GB | Same |
+
+**B300 delivers ~14% higher raw hardware throughput than H200** when running the same software path.
+
+### Comparison 2: Practical (H200 with cuEquivariance vs B300 without)
+
+This reflects what users experience today: H200 with full software optimization vs B300 with vanilla PyTorch fallback.
+
+| Metric | B300 1-node (no cueq) | H200 1-node (with cueq) | H200 advantage |
+|--------|----------------------|------------------------|----------------|
+| Avg step time | 9.45s | **5.56s** | **41.1% faster** |
+| Tokens/sec | 325 | **552** | **69.8% higher** |
+
+| Metric | B300 2-node (no cueq) | H200 2-node (with cueq) | H200 advantage |
+|--------|----------------------|------------------------|----------------|
+| Avg step time | 9.55s | **5.58s** | **41.6% faster** |
+| Tokens/sec | 643 | **1,102** | **71.4% higher** |
+
+**H200 with cuEquivariance is ~70% faster than B300 without it** in practice today.
+
+### cuEquivariance Impact on H200
+
+| Metric | H200 no-cueq | H200 with-cueq | Speedup |
+|--------|-------------|----------------|---------|
+| Tokens/sec (1-node) | 285 | **552** | **1.94x** |
+| Tokens/sec (2-node) | 561 | **1,102** | **1.96x** |
+
+cuEquivariance nearly doubles throughput on H200 by fusing triangle attention and triangle multiplication into single kernel launches. This is the performance B300 would gain once cuEquivariance adds SM 10.3 support ([NVIDIA/cuEquivariance#255](https://github.com/NVIDIA/cuEquivariance/issues/255)).
+
+### Scaling Efficiency
+
+| Config | 1-node tokens/sec | 2-node tokens/sec | Efficiency |
+|--------|-------------------|-------------------|------------|
+| B300 no-cueq | 325 | 643 | **98.8%** |
+| H200 no-cueq | 285 | 561 | **98.4%** |
+| H200 with-cueq | 552 | 1,102 | **99.8%** |
+
+Near-linear scaling across all configurations on both GPU types, confirming EFA + GPU Direct RDMA works well on both HyperPod (B300) and ParallelCluster (H200).
+
+### Key Takeaways
+
+1. **B300 raw hardware is ~14% faster than H200** when running the same code path (vanilla PyTorch, cuEquivariance disabled on both).
+2. **cuEquivariance provides ~2x speedup** on H200 for RF3's triangle attention and triangle multiplication operations.
+3. **Today's practical gap: H200 is ~70% faster than B300** because cuEquivariance works on H200 (SM 9.0) but crashes on B300 (SM 10.3) due to an LLVM backend limitation.
+4. **Once cuEquivariance supports SM 10.3**, B300 should overtake H200 by ~14% (matching the raw hardware advantage), and potentially more if NVIDIA ships Blackwell-specific optimized kernels.
+5. **Memory usage is identical** across both GPUs (~23 GB per GPU), leaving significant headroom for larger workloads.
+6. **Scaling efficiency is excellent** on both platforms (>98%), confirming EFA works equivalently on both cluster types.
