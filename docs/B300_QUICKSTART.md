@@ -18,7 +18,7 @@ curl -LsSf https://astral.sh/uv/install.sh | \
   CARGO_HOME=/fsx/ubuntu/.cargo UV_INSTALL_DIR=/fsx/ubuntu/.local/bin sh
 export PATH=/fsx/ubuntu/.local/bin:$PATH
 
-# Install Python 3.12 (DLAMI only has 3.10)
+# Install Python 3.12 if not already available
 uv python install 3.12
 ```
 
@@ -37,33 +37,18 @@ uv venv --python 3.12 /fsx/ubuntu/venvs/foundry
 # Install foundry with RF3 dependencies
 uv pip install --python /fsx/ubuntu/venvs/foundry/bin/python -e '.[rf3,dev]'
 
-# IMPORTANT: Reinstall PyTorch with CUDA 12.8 (default install pulls cu126 which doesn't support Blackwell)
+# IMPORTANT: Install PyTorch with CUDA 13.0 (default install pulls cu126 which doesn't support Blackwell)
 uv pip install --python /fsx/ubuntu/venvs/foundry/bin/python \
-  torch==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128
+  torch==2.9.1+cu130 --index-url https://download.pytorch.org/whl/cu130
+
+# Install cuEquivariance cu13 (for Blackwell-optimized fused triangle kernels)
+uv pip install --python /fsx/ubuntu/venvs/foundry/bin/python \
+  cuequivariance-ops-cu13==0.9.0 cuequivariance-ops-torch-cu13==0.9.0
 ```
 
-## 3. Fix NVRTC for Blackwell
+> **Why cu130?** Blackwell GPUs (SM 10.x) require NVRTC 13.0+ for runtime kernel compilation. PyTorch cu128 bundles NVRTC 12.8 which crashes on SM 10.3. PyTorch cu130 bundles NVRTC 13.0 natively, so no manual NVRTC swap is needed. cuEquivariance cu13 builds include Blackwell-optimized fused kernels for triangle attention (v0.8.0+).
 
-PyTorch bundles NVRTC 12.8 which does not support SM 10.x (Blackwell). Replace with CUDA 13.0's NVRTC:
-
-```bash
-source /fsx/ubuntu/venvs/foundry/bin/activate
-
-# Run on a compute node (head node has no GPU driver)
-srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
-  source /fsx/ubuntu/venvs/foundry/bin/activate
-  NVRTC_DIR=$(python -c "import nvidia.cuda_nvrtc; import os; print(os.path.dirname(nvidia.cuda_nvrtc.__file__))")/lib
-  cp "$NVRTC_DIR/libnvrtc.so.12" "$NVRTC_DIR/libnvrtc.so.12.backup"
-  cp "$NVRTC_DIR/libnvrtc-builtins.so.12.8" "$NVRTC_DIR/libnvrtc-builtins.so.12.8.backup"
-  cp /usr/local/cuda-13.0/lib64/libnvrtc.so.13.0.88 "$NVRTC_DIR/libnvrtc.so.12"
-  cp /usr/local/cuda-13.0/lib64/libnvrtc-builtins.so.13.0.88 "$NVRTC_DIR/libnvrtc-builtins.so.12.8"
-  echo "NVRTC swap complete"
-'
-```
-
-> **Note**: This only needs to be done once. The venv is on FSx so the fix is visible from all nodes.
-
-## 4. Verify Installation
+## 3. Verify Installation
 
 ```bash
 srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
@@ -71,9 +56,12 @@ srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
   python -c "
 import torch
 print(\"PyTorch:\", torch.__version__)
+print(\"CUDA built with:\", torch.version.cuda)
 print(\"CUDA available:\", torch.cuda.is_available())
 print(\"GPU:\", torch.cuda.get_device_name(0))
 print(\"Compute capability:\", torch.cuda.get_device_capability(0))
+from foundry import SHOULD_USE_CUEQUIVARIANCE
+print(\"cuEquivariance enabled:\", SHOULD_USE_CUEQUIVARIANCE)
 from rf3.model.RF3 import RF3
 from rf3.trainers.rf3 import RF3Trainer
 print(\"RF3 imports: OK\")
@@ -82,14 +70,16 @@ print(\"RF3 imports: OK\")
 
 Expected output:
 ```
-PyTorch: 2.7.1+cu128
+PyTorch: 2.9.1+cu130
+CUDA built with: 13.0
 CUDA available: True
 GPU: NVIDIA B300 SXM6 AC
 Compute capability: (10, 3)
+cuEquivariance enabled: True
 RF3 imports: OK
 ```
 
-## 5. Download RF3 Checkpoint (for inference)
+## 4. Download RF3 Checkpoint (for inference)
 
 ```bash
 srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
@@ -98,13 +88,12 @@ srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
 '
 ```
 
-## 6. Run Inference
+## 5. Run Inference
 
 ```bash
 srun --nodes=1 --ntasks=1 --gres=gpu:1 --partition=dev bash -c '
   source /fsx/ubuntu/venvs/foundry/bin/activate
   cd /fsx/ubuntu/projects/foundry
-  export DISABLE_CUEQUIVARIANCE=1
   export FOUNDRY_CHECKPOINT_DIRS=/fsx/ubuntu/checkpoints
   rf3 fold \
     inputs=models/rf3/tests/data/8vkf_from_file.cif \
@@ -121,44 +110,39 @@ sbatch scripts/inference_test.sbatch
 # Check output: tail -20 slurm_logs/<job_id>-inference.out
 ```
 
-**Expected results:**
-- `8vkf_from_file.cif` (Cytochrome P450, ~407 residues): ~1m 13s (cold start, includes model load)
-- `5vht_from_file.cif` (Chorismate Mutase, ~184 residues): ~46s (warm start)
-
-## 7. Run Training Benchmark
+## 6. Run Training Benchmark
 
 The training benchmark uses synthetic data (random tensors matching RF3 input shapes) to measure GPU throughput without external data dependencies.
 
-### Single-node (8 GPUs)
+### Single-node (8 GPUs, cuEquivariance enabled)
 
 ```bash
 mkdir -p slurm_logs
-sbatch scripts/benchmark_rf3_single.sbatch
+sbatch scripts/b300_bench_cu130_1node.sbatch
 ```
 
 This runs 4 epochs x 50 batches/GPU = 200 optimizer steps with:
 - crop_size=384 tokens, n_atoms=3072, diffusion_batch=48, MSA=1024
 - bf16-mixed precision, DDP across 8 GPUs
-- `DISABLE_CUEQUIVARIANCE=1`
-
-**Expected results (8x B300 SXM6 AC):**
-- Avg step time: ~9.5s
-- Throughput: ~325 tokens/sec, ~0.85 samples/sec
-- Peak GPU memory: ~23 GB per GPU
-- Total run time: ~35 min (including warmup)
+- cuEquivariance **enabled** (Blackwell-optimized fused triangle kernels)
 
 ### Multi-node (2 nodes x 8 GPUs = 16 GPUs)
 
 ```bash
-sbatch scripts/benchmark_rf3.sbatch
+sbatch scripts/b300_bench_cu130_2node.sbatch
 ```
 
-**Expected results (16x B300 SXM6 AC):**
-- Avg step time: ~9.6s (nearly identical to single-node)
-- Throughput: ~643 tokens/sec, ~1.68 samples/sec
-- Scaling efficiency: ~99% (near-linear)
-- Inter-node communication: EFA with GPU Direct RDMA
-- Total run time: ~18 min (including warmup)
+### Benchmark without cuEquivariance (for comparison)
+
+To run with cuEquivariance disabled (vanilla PyTorch triangle ops):
+
+```bash
+# Single-node
+sbatch scripts/benchmark_rf3_single.sbatch
+
+# Multi-node
+sbatch scripts/benchmark_rf3.sbatch
+```
 
 ### Checking results
 
@@ -167,23 +151,23 @@ sbatch scripts/benchmark_rf3.sbatch
 squeue -u ubuntu
 
 # View profiling summary (after job completes)
-grep -A15 'PROFILING SUMMARY' slurm_logs/<job_id>-bench-*.out
+grep -A15 'PROFILING SUMMARY' slurm_logs/<job_id>-*.out
 
 # View epoch timings
-grep 'Epoch.*completed' slurm_logs/<job_id>-bench-*.out
+grep 'Epoch.*completed' slurm_logs/<job_id>-*.out
 
 # Detailed per-step CSV is written to the Hydra output dir (path printed in job output)
 ```
 
 ## Important Notes
 
-### Blackwell-Specific Workarounds
+### Blackwell Requirements
 
-These are required on any SM 10.x GPU (B300, B200, etc.) due to software toolchain gaps:
+These apply to any SM 10.x GPU (B300, B200, etc.):
 
-1. **PyTorch CUDA 12.8 wheels**: Default pip install pulls `cu126` which doesn't support Blackwell. Must use `cu128` or later.
-2. **NVRTC library swap**: PyTorch bundles NVRTC 12.8 which can't compile kernels for SM 10.x. Replace with CUDA 13.0's NVRTC (step 3 above).
-3. **cuEquivariance disabled**: The `cuequivariance_ops` LLVM backend doesn't support SM 10.x. Set `DISABLE_CUEQUIVARIANCE=1`. The model falls back to vanilla PyTorch for triangle attention/multiplication ops. This makes throughput numbers pessimistic compared to what's achievable once cuEquivariance adds Blackwell support.
+1. **PyTorch cu130 required**: Default pip install pulls `cu126` which doesn't support Blackwell. PyTorch cu128 partially works but its bundled NVRTC 12.8 causes cuEquivariance to crash. **Use `torch==2.9.1+cu130`** for full Blackwell support including cuEquivariance.
+2. **cuEquivariance cu13 required**: The cu12 builds of cuequivariance-ops crash on SM 10.x. Install `cuequivariance-ops-cu13` and `cuequivariance-ops-torch-cu13` for Blackwell-optimized fused triangle kernels.
+3. **No NVRTC swap needed with cu130**: PyTorch cu130 bundles NVRTC 13.0 natively, which supports SM 10.x. The manual NVRTC library swap documented in earlier versions of this guide is no longer necessary.
 
 ### SLURM + Lightning Fabric Configuration
 
@@ -217,10 +201,10 @@ Key constraints:
 | Problem | Solution |
 |---------|----------|
 | `nvidia-smi` fails on head node | GPU drivers only on compute nodes. Use `srun --gres=gpu:1` |
-| PyTorch says CUDA not available | Reinstall cu128 wheel (step 2) |
-| `nvrtc: error: invalid value for --gpu-architecture` | Replace bundled NVRTC with CUDA 13.0 version (step 3) |
-| `LLVM ERROR: Cannot select: intrinsic` | Set `export DISABLE_CUEQUIVARIANCE=1` |
+| PyTorch says CUDA not available | Reinstall cu130 wheel (step 2) |
+| `LLVM ERROR: Cannot select: intrinsic` | You're using PyTorch cu128 instead of cu130. Reinstall with `--index-url https://download.pytorch.org/whl/cu130` |
+| `'sm_103a' is not a recognized processor` | Same as above -- need PyTorch cu130 for SM 10.3 support |
+| `SHOULD_USE_CUEQUIVARIANCE: False` | Install `cuequivariance-ops-cu13` and `cuequivariance-ops-torch-cu13` |
 | `devices=8 but ntasks-per-node=1` | Use `#SBATCH --ntasks-per-node=8` with `trainer.devices_per_node=8` |
 | `machine only has: [0]` | Remove `--gpus-per-task=1`, use `--gres=gpu:8` instead |
-| Slurm job stuck in PENDING | Check `sinfo` -- nodes may be in use. Only 2 nodes available |
-| `ModuleNotFoundError: cuequivariance_ops_cu12` | Module name is `cuequivariance_ops` (no `_cu12`). If import fails, reinstall `cuequivariance-ops-cu12` |
+| Slurm job stuck in PENDING | Check `sinfo` -- nodes may be in use |
